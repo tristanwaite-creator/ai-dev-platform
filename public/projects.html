@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Projects | AI Dev Platform</title>
+    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="styles/tokens.css">
+    <link rel="stylesheet" href="styles/components.css">
+    <link rel="stylesheet" href="styles/animations.css">
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <div class="logo">
+                <span class="logo-icon">🏠</span>
+                <span class="logo-text">AI Dev Platform</span>
+            </div>
+            <nav class="nav">
+                <a href="/" class="nav-link">Generator</a>
+                <a href="/projects.html" class="nav-link active">Projects</a>
+            </nav>
+        </header>
+
+        <!-- Projects Section -->
+        <main class="projects-main">
+            <!-- Quick Actions -->
+            <div style="display: flex; gap: var(--space-4); margin: var(--space-8) 0;">
+                <button id="quickStartBtn" class="btn btn-primary btn-xl" style="flex: 1;">
+                    ⚡ Quick Start - Jump to Building
+                </button>
+                <button class="btn btn-secondary btn-xl" id="newProjectBtn" style="flex: 1;">
+                    📚 New Project - Start with Research
+                </button>
+            </div>
+
+            <div class="projects-header">
+                <h1 class="page-title">Your Projects</h1>
+            </div>
+
+            <!-- Loading State -->
+            <div id="loadingState" class="loading-state">
+                <div class="status-spinner"></div>
+                <p>Loading projects...</p>
+            </div>
+
+            <!-- Empty State -->
+            <div id="emptyState" class="empty-state hidden">
+                <div class="empty-icon">📋</div>
+                <h2>No projects yet</h2>
+                <p>Create your first project to get started</p>
+                <button class="create-project-btn">+ Create Project</button>
+            </div>
+
+            <!-- Projects Grid -->
+            <div id="projectsGrid" class="projects-grid hidden"></div>
+        </main>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <p>Powered by Claude Agent SDK</p>
+        </footer>
+    </div>
+
+    <!-- New Project Modal -->
+    <div id="newProjectModal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Create New Project</h2>
+                <button class="modal-close" id="closeModal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="projectName">Project Name</label>
+                    <input
+                        type="text"
+                        id="projectName"
+                        class="modal-input"
+                        placeholder="My Awesome Project"
+                        required
+                    />
+                </div>
+                <div class="form-group">
+                    <label for="projectDescription">Description (optional)</label>
+                    <textarea
+                        id="projectDescription"
+                        class="modal-textarea"
+                        placeholder="What is this project about?"
+                        rows="3"
+                    ></textarea>
+                </div>
+                <div class="checkbox-group">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="createGithubRepo" />
+                        <span>Create GitHub repository</span>
+                    </label>
+                </div>
+                <div id="githubOptions" class="github-options hidden">
+                    <div class="form-group">
+                        <label for="repoName">Repository Name</label>
+                        <input
+                            type="text"
+                            id="repoName"
+                            class="modal-input"
+                            placeholder="my-awesome-project"
+                        />
+                    </div>
+                    <div class="checkbox-group">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="privateRepo" checked />
+                            <span>Private repository</span>
+                        </label>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-secondary" id="cancelBtn">Cancel</button>
+                <button class="btn-primary" id="createBtn">Create Project</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="toastContainer" class="toast-container"></div>
+
+    <script type="module">
+        import { showQuickStart } from './components/quick-start.js';
+
+        // Quick Start button
+        document.getElementById('quickStartBtn').addEventListener('click', () => {
+            showQuickStart();
+        });
+    </script>
+    <script src="projects.js"></script>
+</body>
+</html>

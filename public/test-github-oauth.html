@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Test GitHub OAuth</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 2rem;
+      background: #f5f5f5;
+    }
+    .container {
+      background: white;
+      border-radius: 8px;
+      padding: 2rem;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+    }
+    h1 {
+      color: #333;
+      margin-top: 0;
+    }
+    .step {
+      background: #f8f9fa;
+      border-left: 4px solid #3182ce;
+      padding: 1rem;
+      margin: 1rem 0;
+    }
+    .step h3 {
+      margin-top: 0;
+      color: #3182ce;
+    }
+    button {
+      background: #3182ce;
+      color: white;
+      border: none;
+      padding: 0.75rem 1.5rem;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 1rem;
+      margin: 0.5rem 0;
+    }
+    button:hover {
+      background: #2c5aa0;
+    }
+    button:disabled {
+      background: #ccc;
+      cursor: not-allowed;
+    }
+    .success {
+      background: #d4edda;
+      border-color: #38a169;
+      color: #155724;
+      padding: 1rem;
+      border-radius: 4px;
+      margin: 1rem 0;
+    }
+    .error {
+      background: #f8d7da;
+      border-color: #e53e3e;
+      color: #721c24;
+      padding: 1rem;
+      border-radius: 4px;
+      margin: 1rem 0;
+    }
+    .info {
+      background: #d1ecf1;
+      border-color: #3182ce;
+      color: #0c5460;
+      padding: 1rem;
+      border-radius: 4px;
+      margin: 1rem 0;
+    }
+    pre {
+      background: #f8f9fa;
+      padding: 1rem;
+      border-radius: 4px;
+      overflow-x: auto;
+    }
+    input {
+      width: 100%;
+      padding: 0.5rem;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      font-size: 1rem;
+      margin: 0.5rem 0;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🔗 GitHub OAuth Integration Test</h1>
+
+    <div class="info">
+      <strong>Note:</strong> You need to have GitHub OAuth credentials configured in your .env file for this to work.
+    </div>
+
+    <div class="step">
+      <h3>Step 1: Register or Login</h3>
+      <p>First, create an account or login to get a JWT token.</p>
+
+      <input type="email" id="email" placeholder="Email" value="testuser@example.com">
+      <input type="password" id="password" placeholder="Password" value="TestPassword123">
+      <input type="text" id="name" placeholder="Name (for registration)" value="Test User">
+
+      <div>
+        <button onclick="register()">Register New User</button>
+        <button onclick="login()">Login</button>
+      </div>
+
+      <div id="authStatus"></div>
+    </div>
+
+    <div class="step">
+      <h3>Step 2: Connect GitHub</h3>
+      <p>Once logged in, click the button below to start the GitHub OAuth flow.</p>
+
+      <button id="connectGitHub" onclick="connectGitHub()" disabled>
+        Connect GitHub Account
+      </button>
+
+      <div id="githubStatus"></div>
+    </div>
+
+    <div class="step">
+      <h3>Step 3: Check Status</h3>
+      <p>After connecting, check your GitHub connection status.</p>
+
+      <button id="checkStatus" onclick="checkGitHubStatus()" disabled>
+        Check GitHub Status
+      </button>
+
+      <div id="statusResult"></div>
+    </div>
+
+    <div class="step">
+      <h3>Current Token</h3>
+      <pre id="tokenDisplay">No token yet</pre>
+    </div>
+  </div>
+
+  <script>
+    let accessToken = localStorage.getItem('accessToken');
+    let refreshToken = localStorage.getItem('refreshToken');
+
+    // Update UI on load
+    updateUI();
+
+    function updateUI() {
+      const tokenDisplay = document.getElementById('tokenDisplay');
+      const connectButton = document.getElementById('connectGitHub');
+      const checkButton = document.getElementById('checkStatus');
+
+      if (accessToken) {
+        tokenDisplay.textContent = `Access Token: ${accessToken.substring(0, 30)}...\nRefresh Token: ${refreshToken.substring(0, 30)}...`;
+        connectButton.disabled = false;
+        checkButton.disabled = false;
+      } else {
+        tokenDisplay.textContent = 'No token yet - please register or login first';
+        connectButton.disabled = true;
+        checkButton.disabled = true;
+      }
+    }
+
+    async function register() {
+      const email = document.getElementById('email').value;
+      const password = document.getElementById('password').value;
+      const name = document.getElementById('name').value;
+      const statusDiv = document.getElementById('authStatus');
+
+      try {
+        const response = await fetch('/api/auth/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password, name })
+        });
+
+        const data = await response.json();
+
+        if (response.ok) {
+          accessToken = data.tokens.accessToken;
+          refreshToken = data.tokens.refreshToken;
+          localStorage.setItem('accessToken', accessToken);
+          localStorage.setItem('refreshToken', refreshToken);
+
+          statusDiv.innerHTML = `<div class="success">✓ Registered successfully!<br>User: ${data.user.email}</div>`;
+          updateUI();
+        } else {
+          statusDiv.innerHTML = `<div class="error">❌ ${data.error}</div>`;
+        }
+      } catch (error) {
+        statusDiv.innerHTML = `<div class="error">❌ ${error.message}</div>`;
+      }
+    }
+
+    async function login() {
+      const email = document.getElementById('email').value;
+      const password = document.getElementById('password').value;
+      const statusDiv = document.getElementById('authStatus');
+
+      try {
+        const response = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password })
+        });
+
+        const data = await response.json();
+
+        if (response.ok) {
+          accessToken = data.tokens.accessToken;
+          refreshToken = data.tokens.refreshToken;
+          localStorage.setItem('accessToken', accessToken);
+          localStorage.setItem('refreshToken', refreshToken);
+
+          statusDiv.innerHTML = `<div class="success">✓ Logged in successfully!<br>User: ${data.user.email}</div>`;
+          updateUI();
+        } else {
+          statusDiv.innerHTML = `<div class="error">❌ ${data.error}</div>`;
+        }
+      } catch (error) {
+        statusDiv.innerHTML = `<div class="error">❌ ${error.message}</div>`;
+      }
+    }
+
+    function connectGitHub() {
+      if (!accessToken) {
+        alert('Please login first!');
+        return;
+      }
+
+      // Redirect to GitHub OAuth endpoint with token as query parameter
+      // The server will verify the token and redirect to GitHub
+      window.location.href = `/api/auth/github?token=${encodeURIComponent(accessToken)}`;
+    }
+
+    async function checkGitHubStatus() {
+      const statusDiv = document.getElementById('statusResult');
+
+      try {
+        const response = await fetch('/api/auth/github/status', {
+          headers: {
+            'Authorization': `Bearer ${accessToken}`
+          }
+        });
+
+        const data = await response.json();
+
+        if (response.ok) {
+          if (data.connected) {
+            statusDiv.innerHTML = `
+              <div class="success">
+                ✓ GitHub Connected!<br>
+                Username: ${data.username}<br>
+                ${data.avatarUrl ? `<img src="${data.avatarUrl}" width="50" style="border-radius: 50%; margin-top: 0.5rem;">` : ''}
+              </div>
+            `;
+          } else {
+            statusDiv.innerHTML = `<div class="info">GitHub not connected yet</div>`;
+          }
+        } else {
+          statusDiv.innerHTML = `<div class="error">❌ ${data.error}</div>`;
+        }
+      } catch (error) {
+        statusDiv.innerHTML = `<div class="error">❌ ${error.message}</div>`;
+      }
+    }
+  </script>
+</body>
+</html>

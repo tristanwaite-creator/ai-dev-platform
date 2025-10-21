@@ -1,0 +1,414 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// User model with authentication support
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  password      String?   // Nullable for OAuth users
+  name          String?
+  avatarUrl     String?
+
+  // GitHub OAuth
+  githubId      String?   @unique
+  githubUsername String?
+  githubAccessToken String?
+
+  // Timestamps
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  lastLoginAt   DateTime?
+
+  // Relations
+  projects      Project[]
+  sessions      Session[]
+  createdPages  Page[]    @relation("PageCreator")
+  editedPages   Page[]    @relation("PageEditor")
+
+  @@index([email])
+  @@index([githubId])
+}
+
+// Project model - represents a development project
+model Project {
+  id            String    @id @default(cuid())
+  name          String
+  description   String?
+
+  // GitHub integration
+  githubRepoUrl String?
+  githubRepoId  String?
+  githubRepoOwner String?
+  githubRepoName  String?
+  defaultBranch String?   @default("main")
+
+  // E2B sandbox
+  sandboxId     String?
+  sandboxStatus String?   @default("inactive") // inactive, active, paused
+
+  // Settings
+  settings      Json?     // Flexible JSON for project-specific settings
+
+  // Timestamps
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // Relations
+  userId        String
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tasks         Task[]
+  generations   Generation[]
+  researchSessions ResearchSession[]
+  pages         Page[]
+  agentSessions AgentSession[]
+
+  @@index([userId])
+  @@index([githubRepoId])
+}
+
+// Task model - Kanban board tasks
+model Task {
+  id            String    @id @default(cuid())
+  title         String
+  description   String?
+
+  // Kanban board fields
+  column        String    @default("research") // research, building, testing, done
+  order         Int       @default(0)
+  researchSummary Json?   // Structured summary from research chat
+  buildStatus   String?   @default("pending") // pending, generating, ready, failed
+  approved      Boolean   @default(false)
+  rejectionReason String?
+
+  // Legacy status field (kept for backwards compatibility, deprecated)
+  status        String    @default("todo") // todo, in_progress, review, done
+  priority      String?   @default("medium") // low, medium, high
+
+  // GitHub integration
+  branchName    String?
+  prUrl         String?
+  prNumber      Int?
+
+  // Agent tracking
+  assignedAgent String?   // planning, research, development, testing
+  agentStatus   String?   // idle, working, completed, failed
+
+  // Timestamps
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  completedAt   DateTime?
+
+  // Relations
+  projectId     String
+  project       Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  generations   Generation[]
+  researchMessages ResearchMessage[]
+
+  @@index([projectId])
+  @@index([status])
+  @@index([column])
+}
+
+// Generation model - tracks AI code generation sessions
+model Generation {
+  id            String    @id @default(cuid())
+  prompt        String
+  status        String    @default("pending") // pending, running, completed, failed
+
+  // Output
+  outputPath    String?
+  filesCreated  String[]  @default([])
+  errorMessage  String?
+
+  // E2B sandbox
+  sandboxId     String?
+
+  // GitHub integration
+  commitSha     String?
+  commitUrl     String?
+
+  // Agent info
+  agentModel    String?   @default("claude-sonnet-4-5-20250929")
+  tokenUsage    Int?
+
+  // Timestamps
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  completedAt   DateTime?
+
+  // Relations
+  projectId     String
+  project       Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  taskId        String?
+  task          Task?     @relation(fields: [taskId], references: [id], onDelete: SetNull)
+
+  @@index([projectId])
+  @@index([status])
+}
+
+// Session model - for JWT token management
+model Session {
+  id            String    @id @default(cuid())
+  token         String    @unique
+  expiresAt     DateTime
+
+  // Metadata
+  ipAddress     String?
+  userAgent     String?
+
+  // Timestamps
+  createdAt     DateTime  @default(now())
+
+  // Relations
+  userId        String
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([token])
+  @@index([expiresAt])
+}
+
+// ResearchSession model - Project-level research and note-taking sessions
+model ResearchSession {
+  id            String    @id @default(cuid())
+  title         String
+  description   String?   @db.Text
+
+  // Session type
+  type          String    @default("research") // research, notes, documentation
+  status        String    @default("active")   // active, archived, converted_to_task
+
+  // Document export
+  documentTitle String?
+  documentContent String?  @db.Text
+  documentFormat String?   @default("markdown") // markdown, text
+
+  // Linked task (if converted)
+  convertedTaskId String?
+
+  // Timestamps
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // Relations
+  projectId     String
+  project       Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  messages      ResearchMessage[]
+  documents     ResearchDocument[]
+
+  @@index([projectId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+// ResearchDocument model - Generated documents from research sessions
+model ResearchDocument {
+  id            String    @id @default(cuid())
+  title         String
+  content       String    @db.Text
+  format        String    @default("markdown") // markdown, text, html
+
+  // Export options
+  exported      Boolean   @default(false)
+  exportPath    String?
+
+  // Timestamps
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // Relations
+  sessionId     String
+  session       ResearchSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+  @@index([createdAt])
+}
+
+// ResearchMessage model - for conversational requirements gathering
+// Supports both task-level and project-level research
+model ResearchMessage {
+  id            String    @id @default(cuid())
+  role          String    // "user" or "assistant"
+  content       String    @db.Text
+
+  // Timestamps
+  createdAt     DateTime  @default(now())
+
+  // Relations - either taskId or sessionId must be set
+  taskId        String?
+  task          Task?     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  sessionId     String?
+  session       ResearchSession? @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([taskId])
+  @@index([sessionId])
+  @@index([createdAt])
+}
+
+// Page model - Notion-like pages with hierarchical structure
+model Page {
+  id            String    @id @default(cuid())
+
+  // Content
+  title         String    @default("Untitled")
+  icon          String?   // Emoji or icon identifier
+  type          String    @default("document") // "document" or "folder"
+
+  // Hierarchy - pages can be nested
+  parentId      String?
+  parent        Page?     @relation("PageHierarchy", fields: [parentId], references: [id], onDelete: Cascade)
+  children      Page[]    @relation("PageHierarchy")
+
+  // Metadata
+  isFavorite    Boolean   @default(false)
+  isArchived    Boolean   @default(false)
+
+  // Ordering - for drag and drop
+  order         Int       @default(0)
+
+  // Project context
+  projectId     String
+  project       Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  // Creator
+  createdById   String
+  createdBy     User      @relation("PageCreator", fields: [createdById], references: [id], onDelete: Cascade)
+
+  // Last editor
+  lastEditedById String?
+  lastEditedBy   User?    @relation("PageEditor", fields: [lastEditedById], references: [id])
+
+  // Timestamps
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // Relations
+  blocks        Block[]
+
+  @@index([projectId])
+  @@index([parentId])
+  @@index([createdById])
+  @@index([order])
+}
+
+// Block model - content units within pages
+model Block {
+  id            String    @id @default(cuid())
+
+  // Block type - text, heading, list, code, etc.
+  type          String    @default("text") // text, heading_1, heading_2, heading_3, bullet_list, numbered_list, code, quote
+
+  // Content - flexible JSON for different block types
+  content       Json      // { "text": "content", "formatting": [...] }
+
+  // Hierarchy - blocks can be nested (indented)
+  parentBlockId String?
+  parentBlock   Block?    @relation("BlockHierarchy", fields: [parentBlockId], references: [id], onDelete: Cascade)
+  children      Block[]   @relation("BlockHierarchy")
+
+  // Ordering - for drag and drop
+  order         Int       @default(0)
+
+  // Page context
+  pageId        String
+  page          Page      @relation(fields: [pageId], references: [id], onDelete: Cascade)
+
+  // Timestamps
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([pageId])
+  @@index([parentBlockId])
+  @@index([order])
+}
+
+// AgentSession model - AI assistant chat sessions within pages/docs
+model AgentSession {
+  id            String    @id @default(cuid())
+
+  // Session metadata
+  type          String    @default("assistant") // assistant, autonomous, batch
+  status        String    @default("active")    // active, paused, completed
+
+  // Context tracking
+  currentPageId String?
+  workspaceContext Json?   // { projectId, userId, recentPages, currentFolder, etc }
+
+  // Timestamps
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  completedAt   DateTime?
+
+  // Relations
+  projectId     String
+  project       Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  messages      AgentMessage[]
+  actions       AgentAction[]
+
+  @@index([projectId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+// AgentMessage model - conversation messages with the AI assistant
+model AgentMessage {
+  id            String    @id @default(cuid())
+  role          String    // user, assistant
+  content       String    @db.Text
+
+  // Tool usage tracking
+  toolCalls     Json?     // Array of { name, input, output }
+
+  // Timestamps
+  createdAt     DateTime  @default(now())
+
+  // Relations
+  sessionId     String
+  session       AgentSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+  @@index([createdAt])
+}
+
+// AgentAction model - tracks actions performed by the agent
+model AgentAction {
+  id            String    @id @default(cuid())
+
+  // Action details
+  actionType    String    // create_page, update_page, delete_page, search, organize, etc.
+  targetId      String?   // Page/Block ID affected
+  targetType    String?   // page, block, folder
+  details       Json?     // Action parameters and results
+
+  // Approval workflow (optional future feature)
+  status        String    @default("executed") // pending, approved, rejected, executed
+  reviewedBy    String?
+  reviewedAt    DateTime?
+
+  // Timestamps
+  createdAt     DateTime  @default(now())
+  executedAt    DateTime?
+
+  // Relations
+  sessionId     String
+  session       AgentSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+  @@index([status])
+  @@index([actionType])
+  @@index([createdAt])
+}

@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test E2B Generation</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+        }
+        #status {
+            background: #f0f0f0;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 20px 0;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .event {
+            margin: 5px 0;
+            padding: 5px;
+            border-left: 3px solid #007bff;
+            background: white;
+        }
+        .error { border-left-color: #dc3545; }
+        .success { border-left-color: #28a745; }
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        button:hover { background: #0056b3; }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        input {
+            width: 100%;
+            padding: 10px;
+            margin: 10px 0;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Test E2B Generation</h1>
+
+    <div>
+        <input type="text" id="prompt" placeholder="Enter project description (e.g., 'a simple todo list app')" value="a simple landing page with a gradient background">
+        <button id="generateBtn" onclick="testGeneration()">Generate Project</button>
+    </div>
+
+    <div id="status"></div>
+
+    <script>
+        const token = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiJjbWd0ejgxNzIwMDA3eTllb2ppdmtzOHdoIiwiZW1haWwiOiJ0ZXN0dXNlcjJAZXhhbXBsZS5jb20iLCJpYXQiOjE3NjA2NTI4MDcsImV4cCI6MTc2MDY1MzcwN30.kPugBX54YGryB5CfoyI-DBAVTgsQeOPJWcl_WDIX4HQ';
+
+        function addEvent(message, type = 'info') {
+            const status = document.getElementById('status');
+            const event = document.createElement('div');
+            event.className = `event ${type}`;
+            event.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            status.appendChild(event);
+            status.scrollTop = status.scrollHeight;
+        }
+
+        async function testGeneration() {
+            const btn = document.getElementById('generateBtn');
+            const promptInput = document.getElementById('prompt');
+            const prompt = promptInput.value.trim();
+
+            if (!prompt) {
+                addEvent('Please enter a project description', 'error');
+                return;
+            }
+
+            btn.disabled = true;
+            document.getElementById('status').innerHTML = '';
+            addEvent('Starting generation test...');
+
+            try {
+                const response = await fetch('http://localhost:3000/api/generate', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ prompt })
+                });
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop();
+
+                    for (const line of lines) {
+                        if (line.startsWith('event:')) {
+                            const eventType = line.substring(6).trim();
+                            const nextLine = lines.shift();
+                            if (nextLine && nextLine.startsWith('data:')) {
+                                const data = JSON.parse(nextLine.substring(5).trim());
+                                handleEvent(eventType, data);
+                            }
+                        }
+                    }
+                }
+
+            } catch (error) {
+                addEvent(`Error: ${error.message}`, 'error');
+            } finally {
+                btn.disabled = false;
+            }
+        }
+
+        function handleEvent(eventType, data) {
+            switch (eventType) {
+                case 'status':
+                    addEvent(`Status: ${data.message}`, 'info');
+                    if (data.sandboxId) {
+                        addEvent(`Sandbox ID: ${data.sandboxId}`, 'success');
+                        addEvent(`Sandbox will expire at: ${new Date(data.expiresAt).toLocaleString()}`, 'info');
+                    }
+                    break;
+                case 'text':
+                    addEvent(`Claude: ${data.content.substring(0, 100)}...`);
+                    break;
+                case 'tool':
+                    if (data.name) {
+                        addEvent(`Tool: ${data.name} - ${data.action}`, 'info');
+                    }
+                    break;
+                case 'error':
+                    addEvent(`Error: ${data.message}`, 'error');
+                    break;
+                case 'complete':
+                    addEvent('✅ Generation complete!', 'success');
+                    if (data.sandboxUrl) {
+                        addEvent(`Preview URL: ${data.sandboxUrl}`, 'success');
+                        addEvent(`Files created: ${data.filesCreated?.length || 0}`, 'success');
+                    }
+                    break;
+            }
+        }
+    </script>
+</body>
+</html>
