@@ -264,7 +264,8 @@ router.get('/github/callback-anon', asyncHandler(async (req, res) => {
     await cache.set(`github_session:${user.id}`, sessionToken, 604800); // 7 days
 
     // Redirect to frontend with session info
-    const redirectUrl = new URL('/', `http://localhost:${process.env.PORT || 3000}`);
+    const frontendPort = process.env.FRONTEND_PORT || 3001;
+    const redirectUrl = new URL('/', `http://localhost:${frontendPort}`);
     redirectUrl.searchParams.set('github_auth', 'success');
     redirectUrl.searchParams.set('session', sessionToken);
     redirectUrl.searchParams.set('username', githubUser.login);

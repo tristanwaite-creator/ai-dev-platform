@@ -434,4 +434,157 @@ router.get(
   })
 );
 
+// ============================================
+// GitHub Repository Import
+// ============================================
+
+/**
+ * List user's GitHub repositories
+ * GET /api/github/repos
+ */
+router.get(
+  '/github/repos',
+  authenticate,
+  asyncHandler(async (req, res) => {
+    const user = await db.user.findUnique({
+      where: { id: req.userId! },
+      select: {
+        id: true,
+        githubAccessToken: true,
+      },
+    });
+
+    if (!user || !user.githubAccessToken) {
+      return res.status(400).json({ error: 'GitHub not connected. Please connect your GitHub account.' });
+    }
+
+    // Decrypt GitHub token
+    const { decrypt } = await import('../lib/encryption.js');
+    const githubToken = decrypt(user.githubAccessToken);
+
+    // Import Octokit for direct GitHub API access
+    const { Octokit } = await import('@octokit/rest');
+    const octokit = new Octokit({ auth: githubToken });
+
+    // Fetch repositories
+    const page = parseInt(req.query.page as string) || 1;
+    const perPage = parseInt(req.query.per_page as string) || 50;
+
+    const { data: repos } = await octokit.repos.listForAuthenticatedUser({
+      page,
+      per_page: perPage,
+      sort: 'updated',
+      affiliation: 'owner,collaborator',
+    });
+
+    // Get list of already imported repos
+    const existingProjects = await db.project.findMany({
+      where: { userId: req.userId! },
+      select: { githubRepoId: true },
+    });
+    const importedRepoIds = new Set(existingProjects.map(p => p.githubRepoId).filter(Boolean));
+
+    // Format repos with import status
+    const formattedRepos = repos.map(repo => ({
+      id: repo.id,
+      name: repo.name,
+      fullName: repo.full_name,
+      description: repo.description,
+      private: repo.private,
+      url: repo.html_url,
+      defaultBranch: repo.default_branch,
+      owner: repo.owner.login,
+      updatedAt: repo.updated_at,
+      language: repo.language,
+      imported: importedRepoIds.has(String(repo.id)),
+    }));
+
+    res.json({ repos: formattedRepos });
+  })
+);
+
+/**
+ * Import an existing GitHub repository as a project
+ * POST /api/github/import-repo
+ */
+router.post(
+  '/github/import-repo',
+  authenticate,
+  asyncHandler(async (req, res) => {
+    const { repoId, repoFullName } = req.body;
+
+    if (!repoId && !repoFullName) {
+      return res.status(400).json({ error: 'Either repoId or repoFullName is required' });
+    }
+
+    const user = await db.user.findUnique({
+      where: { id: req.userId! },
+      select: {
+        id: true,
+        githubAccessToken: true,
+      },
+    });
+
+    if (!user || !user.githubAccessToken) {
+      return res.status(400).json({ error: 'GitHub not connected. Please connect your GitHub account.' });
+    }
+
+    // Check if already imported
+    if (repoId) {
+      const existing = await db.project.findFirst({
+        where: { userId: req.userId!, githubRepoId: String(repoId) },
+      });
+      if (existing) {
+        return res.status(400).json({ error: 'Repository already imported', projectId: existing.id });
+      }
+    }
+
+    // Decrypt GitHub token
+    const { decrypt } = await import('../lib/encryption.js');
+    const githubToken = decrypt(user.githubAccessToken);
+
+    // Import Octokit for direct GitHub API access
+    const { Octokit } = await import('@octokit/rest');
+    const octokit = new Octokit({ auth: githubToken });
+
+    // Fetch repository details
+    let repo;
+    if (repoId) {
+      const { data } = await octokit.request('GET /repositories/{repository_id}', {
+        repository_id: repoId,
+      });
+      repo = data;
+    } else {
+      const [owner, name] = repoFullName.split('/');
+      const { data } = await octokit.repos.get({ owner, repo: name });
+      repo = data;
+    }
+
+    // Create project from repo
+    const project = await db.project.create({
+      data: {
+        name: repo.name,
+        description: repo.description || '',
+        githubRepoUrl: repo.html_url,
+        githubRepoId: String(repo.id),
+        githubRepoOwner: repo.owner.login,
+        githubRepoName: repo.name,
+        defaultBranch: repo.default_branch || 'main',
+        userId: user.id,
+      },
+    });
+
+    res.status(201).json({
+      success: true,
+      message: 'Repository imported successfully',
+      project: {
+        id: project.id,
+        name: project.name,
+        description: project.description,
+        githubRepoUrl: project.githubRepoUrl,
+      },
+    });
+  })
+);
+
 export default router;

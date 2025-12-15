@@ -90,21 +90,20 @@ model Task {
   order         Int       @default(0)
   researchSummary Json?   // Structured summary from research chat
   buildStatus   String?   @default("pending") // pending, generating, ready, failed
-  approved      Boolean   @default(false)
-  rejectionReason String?
 
-  // Legacy status field (kept for backwards compatibility, deprecated)
+  // Legacy status field - still used in PR creation trigger
   status        String    @default("todo") // todo, in_progress, review, done
   priority      String?   @default("medium") // low, medium, high
+
+  // Research → Build workflow
+  agentSessionId    String?   // Agent session that created this task
+  agentSession      AgentSession? @relation(fields: [agentSessionId], references: [id], onDelete: SetNull)
+  synthesizedPrompt String?   @db.Text // The prompt synthesized from research
 
   // GitHub integration
   branchName    String?
   prUrl         String?
   prNumber      Int?
-
-  // Agent tracking
-  assignedAgent String?   // planning, research, development, testing
-  agentStatus   String?   // idle, working, completed, failed
 
   // Timestamps
   createdAt     DateTime  @default(now())
@@ -120,6 +119,7 @@ model Task {
   @@index([projectId])
   @@index([status])
   @@index([column])
+  @@index([agentSessionId])
 }
 
 // Generation model - tracks AI code generation sessions
@@ -129,7 +129,6 @@ model Generation {
   status        String    @default("pending") // pending, running, completed, failed
 
   // Output
-  outputPath    String?
   filesCreated  String[]  @default([])
   errorMessage  String?
 
@@ -341,6 +340,7 @@ model AgentSession {
   id            String    @id @default(cuid())
 
   // Session metadata
+  title         String?   // Auto-generated from first message or "Research Chat"
   type          String    @default("assistant") // assistant, autonomous, batch
   status        String    @default("active")    // active, paused, completed
 
@@ -358,6 +358,7 @@ model AgentSession {
   project       Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
   messages      AgentMessage[]
   actions       AgentAction[]
+  tasks         Task[]    // Tasks created from this research session
 
   @@index([projectId])
   @@index([status])

@@ -175,13 +175,10 @@ export async function logout(refreshToken: string): Promise<void> {
  * Refresh access token
  */
 export async function refreshAccessToken(refreshToken: string): Promise<AuthTokens> {
-  // Check Redis first
-  const userId = await sessionManager.getSession(refreshToken);
-  if (!userId) {
-    throw new Error('Invalid or expired refresh token');
-  }
+  // Check Redis first (but don't fail if Redis is unavailable)
+  const cachedUserId = await sessionManager.getSession(refreshToken);
 
-  // Verify session exists in database
+  // Always verify session exists in database (Redis is optional cache)
   const session = await db.session.findUnique({
     where: { token: refreshToken },
     include: { user: true },
@@ -193,6 +190,8 @@ export async function refreshAccessToken(refreshToken: string): Promise<AuthToke
     await db.session.deleteMany({ where: { token: refreshToken } });
     throw new Error('Invalid or expired refresh token');
   }
+
+  // If Redis had no entry but DB has valid session, that's OK (Redis might have been down)
 
   // Generate new tokens
   const tokenPayload: TokenPayload = {

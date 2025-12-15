@@ -1,9 +1,13 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { db } from '../lib/db.js';
+import { e2bService } from '../lib/e2b.js';
 
 interface ChatOptions {
   sessionId: string;
   userMessage: string;
+  searchEnabled?: boolean;
+  thinkingEnabled?: boolean;
+  codebaseEnabled?: boolean;
   onToolStart?: (toolName: string, input: any) => void;
   onToolComplete?: (toolName: string, result: any) => void;
 }
@@ -61,7 +65,15 @@ class PagesAgentService {
    * Chat with the agent
    */
   async chat(options: ChatOptions): Promise<ChatResponse> {
-    const { sessionId, userMessage, onToolStart, onToolComplete } = options;
+    const {
+      sessionId,
+      userMessage,
+      searchEnabled = true,
+      thinkingEnabled = false,
+      codebaseEnabled = false,
+      onToolStart,
+      onToolComplete,
+    } = options;
 
     // Get session with context
     const session = await db.agentSession.findUnique({
@@ -100,121 +112,117 @@ class PagesAgentService {
       content: userMessage,
     });
 
-    // Build system prompt (Claude SDK Best Practices)
-    const systemPrompt = `You are an advanced AI research assistant powered by Claude, specializing in deep research and knowledge management for "${session.project.name}".
+    // Build system prompt based on mode (Claude SDK Best Practices)
+    const modes: string[] = [];
+    if (searchEnabled) modes.push('Web Search');
+    if (codebaseEnabled) modes.push('Codebase Analysis');
+    if (!searchEnabled && !codebaseEnabled) modes.push('Quick Chat');
 
-## Your Role & Capabilities
+    const modeDescription = (() => {
+      const parts: string[] = [];
+      if (searchEnabled) parts.push('real-time web search');
+      if (codebaseEnabled) parts.push('access to read and analyze the project codebase');
+      if (parts.length === 0) return 'You are in Quick Chat mode - respond directly without web searches for faster responses.';
+      return `You have access to ${parts.join(' and ')} and document management tools.`;
+    })();
 
-You are a **world-class research agent** with access to real-time web search and document management tools. Your mission is to conduct thorough research, synthesize complex information, and help users build comprehensive knowledge bases.
+    const toolsDescription = (() => {
+      const sections: string[] = [];
 
-### Research Tools at Your Disposal:
-- **search_web**: Real-time internet search via Perplexity AI (use liberally for up-to-date information)
-- **Workspace Tools**: list_pages, read_page, search_pages, create_page, update_page, create_folder
-- **Workflow Integration**: create_task_from_research - Convert research pages into kanban board tasks
+      if (searchEnabled) {
+        sections.push(`- **search_web**: Search the web for current facts (use sparingly - one search is usually enough)`);
+      }
 
-### Current Context:
-- Project: ${session.project.name}
-- Mode: Research & Knowledge Management
+      if (codebaseEnabled) {
+        sections.push(`- **list_project_files**: Browse the project's file structure
+- **read_project_file**: Read any file from the project codebase
+- **search_project_code**: Search for patterns or text across the codebase`);
+      }
 
-## Operating Guidelines
+      sections.push(`- **Workspace Tools**: list_pages, read_page, search_pages, create_page, update_page, create_folder
+- **Workflow Integration**: create_task_from_research - Convert research pages into kanban board tasks`);
 
-### 1. Research Strategy (Use Extended Thinking)
+      if (!searchEnabled && !codebaseEnabled) {
+        sections.push(`- Note: Web search and codebase access are disabled for faster responses.`);
+      }
 
-For complex research tasks:
-- **Break down** the research question into sub-topics
-- **Search strategically**: Use multiple targeted searches rather than one broad search
-- **Synthesize findings**: Combine information from multiple sources
-- **Cite sources**: Include citations when presenting research findings
-- **Think step-by-step**: For multi-layered questions, work through them systematically
+      return `### Tools at Your Disposal:\n${sections.join('\n')}`;
+    })();
 
-Example workflow:
-1. Analyze user's research question
-2. Identify key sub-topics to investigate
-3. Execute targeted searches for each sub-topic
-4. Synthesize findings into coherent narrative
-5. Organize into appropriate page structure
+    const currentMode = modes.join(' + ');
 
-### 2. Content Writing Rules (CRITICAL)
+    // Quick chat mode - no tools, faster responses
+    const isQuickChatMode = !searchEnabled && !codebaseEnabled;
 
-When creating or updating pages:
-- ✅ **DO**: Write full content directly to the page using tools
-- ❌ **DO NOT**: Describe, preview, or summarize the content in chat
-- ✅ **DO**: Simply confirm: "I've created the page with comprehensive research findings"
-- ❌ **DO NOT**: Say "I'll include information about X, Y, Z..." - just write it to the page!
+    const systemPrompt = isQuickChatMode
+      ? `You are a helpful assistant for "${session.project.name}". Be concise and direct. You're in quick chat mode - no web search or codebase access, just helpful conversation.`
+      : `You are a helpful research assistant for "${session.project.name}".
 
-The user will read the content by opening the page. Keep chat responses focused on meta-information (what you created, where it is, next steps).
+${modeDescription}
 
-### 3. Permission Protocol
+## Your Role
 
-**Automatic workflows** (NO permission needed):
-- When user asks to "create a plan", "build a summary", "prepare implementation steps", etc.:
-  1. Automatically create_page with research/plan
-  2. Automatically create_task_from_research to add to kanban
-  3. Simply inform user: "I've created a task in your Research kanban"
-- Read-only tools (list_pages, read_page, search_web) never need permission
+You are a conversational research assistant. Your job is to:
+1. **Discuss ideas** with the user
+2. **Search and research** topics when asked
+3. **Present findings in chat** for discussion
+4. **Help refine ideas** through conversation
 
-**Ask permission first** (for general workspace modifications):
-- Creating pages/folders for general documentation (not task-related)
-- Updating existing pages
-- Creating organizational structures
-- Example: "Shall I create a reference page for this information?"
+## IMPORTANT: Do NOT auto-create pages or tasks
 
-### 4. Deep Research Mode
+- **Do NOT use create_page, update_page, or create_task_from_research** unless the user EXPLICITLY asks you to create/save something
+- Instead, share your research findings directly in the chat message
+- Let the user read and discuss the research with you first
+- The user has "Create Task" and "Save as Note" buttons - they will use those when ready
 
-For comprehensive research tasks:
-- Use **multiple search queries** to gather diverse perspectives
-- Cross-reference information from different sources
-- Identify knowledge gaps and propose follow-up research
-- Suggest organizational structures for complex topics
-- Create hierarchical page structures (folders + pages) for large research projects
+## Guidelines
 
-### 5. Proactive Intelligence
+1. **Be conversational** - Discuss, explain, and explore ideas with the user like a helpful colleague
+2. **Show research in chat** - When you search, share the key findings in your response
+3. **Search smartly** - One good search is usually enough. Don't over-search.
+4. **Keep responses clear** - Format with headers and bullets for readability
+5. **Ask follow-up questions** - Help clarify requirements through discussion
 
-- **Anticipate needs**: Suggest related research topics
-- **Connect concepts**: Link related pages and ideas
-- **Identify patterns**: Highlight recurring themes across research
-- **Quality control**: Ensure citations, accuracy, and completeness
+Current project: ${session.project.name}
+Mode: ${currentMode}`;
 
-### 6. Research to Development Workflow - AUTOMATIC TASK CREATION
+    // Quick chat mode: simple API call without tools for faster response
+    if (isQuickChatMode) {
+      const response = await this.anthropic.messages.create({
+        model: 'claude-sonnet-4-5-20250929',
+        max_tokens: 2048,
+        system: systemPrompt,
+        messages: conversationHistory,
+      });
 
-**IMPORTANT**: When the user asks you to create plans, summaries, or actionable content, AUTOMATICALLY convert it to a kanban task. No permission needed.
+      const textContent = response.content.find((block) => block.type === 'text');
+      const finalText = textContent && textContent.type === 'text' ? textContent.text : '';
 
-**Trigger phrases** (automatically create task):
-- "create a plan for..."
-- "summarize this and..."
-- "build a plan..."
-- "prepare a task for..."
-- "what do I need to implement..."
-- Any request that implies future work or implementation
+      // Save assistant message
+      const savedMessage = await db.agentMessage.create({
+        data: {
+          sessionId,
+          role: 'assistant',
+          content: finalText,
+        },
+      });
 
-**Automatic workflow**:
-1. User asks for research/plan with implementation intent
-2. Create a page with comprehensive research/plan
-3. AUTOMATICALLY call create_task_from_research (no permission needed)
-4. Inform user: "I've created a task in your Research kanban"
+      // Auto-generate title on first exchange
+      const messageCount = session.messages.length + 2;
+      if (messageCount === 2 && !session.title) {
+        await this.generateSessionTitle(sessionId, userMessage, finalText);
+      }
 
-**Example**:
-- User: "Research authentication best practices and create a plan"
-- Agent: *searches web, creates page, automatically creates task*
-- Agent: "I've researched authentication best practices and created a task in your Research kanban with an implementation plan."
+      console.log(`💬 Quick chat response complete for session ${sessionId}`);
 
-**Only ask permission for**:
-- Creating/updating pages that don't relate to tasks
-- Creating folders for organization
-- Updating existing content
+      return {
+        messageId: savedMessage.id,
+        content: finalText,
+      };
+    }
 
-**Task details**:
-- Tasks are placed in the "Research" column
-- Task title/description auto-generated from page content
-- Includes reference back to source research page
-
-## Remember
-
-You have access to the full internet via search_web. Use it extensively for any question requiring current information, facts, technical details, or recent developments. Your goal is to be a tireless research partner who produces publication-quality research documents and seamlessly integrates research findings into the development workflow.`;
-
-
-    // Define available tools
-    const tools = this.getToolDefinitions();
+    // Tool-enabled mode: use tools for search/codebase access
+    const tools = this.getToolDefinitions(searchEnabled, codebaseEnabled);
 
     // Call Claude with tools
     let response = await this.anthropic.messages.create({
@@ -328,6 +336,12 @@ You have access to the full internet via search_web. Use it extensively for any 
       },
     });
 
+    // Auto-generate title on first exchange (when we have 2+ messages)
+    const messageCount = session.messages.length + 2; // +2 for user and assistant just added
+    if (messageCount === 2 && !session.title) {
+      await this.generateSessionTitle(sessionId, userMessage, finalText);
+    }
+
     console.log(`💬 Agent response complete for session ${sessionId}`);
 
     return {
@@ -338,29 +352,116 @@ You have access to the full internet via search_web. Use it extensively for any 
   }
 
   /**
+   * Generate a concise title for the session based on the first exchange
+   */
+  private async generateSessionTitle(sessionId: string, userMessage: string, assistantResponse: string): Promise<void> {
+    try {
+      const response = await this.anthropic.messages.create({
+        model: 'claude-sonnet-4-5-20250929',
+        max_tokens: 50,
+        system: 'Generate a very short (2-5 words) title for this research conversation. Be concise and descriptive. Output only the title, nothing else.',
+        messages: [
+          {
+            role: 'user',
+            content: `User: ${userMessage.slice(0, 500)}\n\nAssistant: ${assistantResponse.slice(0, 500)}`,
+          },
+        ],
+      });
+
+      const title = response.content[0].type === 'text'
+        ? response.content[0].text.trim().replace(/^["']|["']$/g, '') // Remove quotes
+        : 'Research Chat';
+
+      await db.agentSession.update({
+        where: { id: sessionId },
+        data: { title },
+      });
+
+      console.log(`📝 Generated session title: ${title}`);
+    } catch (error) {
+      console.error('Failed to generate session title:', error);
+      // Don't fail the whole operation if title generation fails
+    }
+  }
+
+  /**
    * Get tool definitions
    */
-  private getToolDefinitions(): ToolDefinition[] {
-    return [
-      {
+  private getToolDefinitions(searchEnabled: boolean = true, codebaseEnabled: boolean = false): ToolDefinition[] {
+    const tools: ToolDefinition[] = [];
+
+    // Only include search tool if searchEnabled
+    if (searchEnabled) {
+      tools.push({
         name: 'search_web',
-        description: 'Search the internet for current information using Perplexity AI. Use this for research, fact-checking, finding recent developments, or gathering information on any topic. Returns comprehensive, up-to-date results with sources.',
+        description: 'Search the web for current facts or recent information. Use only when you need up-to-date data, not for common knowledge. One focused search is usually sufficient.',
         input_schema: {
           type: 'object',
           properties: {
             query: {
               type: 'string',
-              description: 'The search query or research question. Be specific and detailed for best results.',
-            },
-            focus: {
-              type: 'string',
-              description: 'Optional focus area: "academic" for scholarly sources, "news" for recent news, "writing" for general information. Default is general search.',
-              enum: ['academic', 'news', 'writing', 'general'],
+              description: 'A specific, focused search query. Be concise.',
             },
           },
           required: ['query'],
         },
-      },
+      });
+    }
+
+    // Only include codebase tools if codebaseEnabled
+    if (codebaseEnabled) {
+      tools.push(
+        {
+          name: 'list_project_files',
+          description: 'List files and directories in the project. Use this to explore the project structure and understand what files exist.',
+          input_schema: {
+            type: 'object',
+            properties: {
+              path: {
+                type: 'string',
+                description: 'The directory path to list. Use "/" for the root directory, or specify a subdirectory like "/src" or "/components".',
+              },
+            },
+            required: ['path'],
+          },
+        },
+        {
+          name: 'read_project_file',
+          description: 'Read the contents of a specific file from the project. Use this to understand existing code, configurations, or documentation.',
+          input_schema: {
+            type: 'object',
+            properties: {
+              path: {
+                type: 'string',
+                description: 'The path to the file to read, e.g., "/src/index.ts" or "/package.json".',
+              },
+            },
+            required: ['path'],
+          },
+        },
+        {
+          name: 'search_project_code',
+          description: 'Search for a pattern or text across the project codebase. Use this to find where certain functions, variables, or patterns are used.',
+          input_schema: {
+            type: 'object',
+            properties: {
+              pattern: {
+                type: 'string',
+                description: 'The search pattern or text to find in the codebase.',
+              },
+              filePattern: {
+                type: 'string',
+                description: 'Optional file pattern to filter results, e.g., "*.ts" for TypeScript files or "*.tsx" for React components.',
+              },
+            },
+            required: ['pattern'],
+          },
+        }
+      );
+    }
+
+    // Always include workspace tools
+    tools.push(
       {
         name: 'list_pages',
         description: 'List all pages in a folder or at the root level. Use this to explore the workspace structure.',
@@ -485,8 +586,10 @@ You have access to the full internet via search_web. Use it extensively for any 
           },
           required: ['pageId'],
         },
-      },
-    ];
+      }
+    );
+
+    return tools;
   }
 
   /**
@@ -503,8 +606,19 @@ You have access to the full internet via search_web. Use it extensively for any 
 
     switch (toolName) {
       case 'search_web':
-        return this.toolSearchWeb(input.query, input.focus);
+        return this.toolSearchWeb(input.query);
 
+      // Codebase tools
+      case 'list_project_files':
+        return this.toolListProjectFiles(projectId, input.path);
+
+      case 'read_project_file':
+        return this.toolReadProjectFile(projectId, input.path);
+
+      case 'search_project_code':
+        return this.toolSearchProjectCode(projectId, input.pattern, input.filePattern);
+
+      // Page management tools
       case 'list_pages':
         return this.toolListPages(projectId, input.parentId);
 
@@ -532,24 +646,194 @@ You have access to the full internet via search_web. Use it extensively for any 
   }
 
   /**
+   * Tool: List project files from E2B sandbox
+   */
+  private async toolListProjectFiles(projectId: string, path: string) {
+    // Get project's sandbox ID
+    const project = await db.project.findUnique({
+      where: { id: projectId },
+      select: { sandboxId: true },
+    });
+
+    if (!project?.sandboxId) {
+      // If no sandbox exists, return a helpful message
+      return {
+        path,
+        files: [],
+        message: 'No active sandbox for this project. Start a build to create one.',
+        success: false,
+      };
+    }
+
+    try {
+      const files = await e2bService.listFiles(project.sandboxId, `/home/user${path}`);
+
+      console.log(`📂 Listed files at ${path}: ${files.length} items`);
+
+      return {
+        path,
+        files: files.map((f: any) => ({
+          name: f.name,
+          type: f.isDir ? 'directory' : 'file',
+          path: `${path}/${f.name}`.replace('//', '/'),
+        })),
+        count: files.length,
+        success: true,
+      };
+    } catch (error: any) {
+      console.error(`❌ Failed to list files at ${path}:`, error.message);
+      return {
+        path,
+        error: error.message,
+        success: false,
+      };
+    }
+  }
+
+  /**
+   * Tool: Read project file from E2B sandbox
+   */
+  private async toolReadProjectFile(projectId: string, path: string) {
+    // Get project's sandbox ID
+    const project = await db.project.findUnique({
+      where: { id: projectId },
+      select: { sandboxId: true },
+    });
+
+    if (!project?.sandboxId) {
+      return {
+        path,
+        content: null,
+        message: 'No active sandbox for this project. Start a build to create one.',
+        success: false,
+      };
+    }
+
+    try {
+      const content = await e2bService.readFile(project.sandboxId, `/home/user${path}`);
+
+      // Truncate very long files
+      const maxLength = 50000;
+      const truncated = content.length > maxLength;
+      const displayContent = truncated
+        ? content.substring(0, maxLength) + '\n\n... (truncated)'
+        : content;
+
+      console.log(`📖 Read file ${path}: ${content.length} bytes`);
+
+      return {
+        path,
+        content: displayContent,
+        size: content.length,
+        truncated,
+        success: true,
+      };
+    } catch (error: any) {
+      console.error(`❌ Failed to read file ${path}:`, error.message);
+      return {
+        path,
+        content: null,
+        error: error.message,
+        success: false,
+      };
+    }
+  }
+
+  /**
+   * Tool: Search project code in E2B sandbox
+   */
+  private async toolSearchProjectCode(projectId: string, pattern: string, filePattern?: string) {
+    // Get project's sandbox ID
+    const project = await db.project.findUnique({
+      where: { id: projectId },
+      select: { sandboxId: true },
+    });
+
+    if (!project?.sandboxId) {
+      return {
+        pattern,
+        results: [],
+        message: 'No active sandbox for this project. Start a build to create one.',
+        success: false,
+      };
+    }
+
+    try {
+      // Get the sandbox
+      const sandboxInfo = e2bService.getSandbox(project.sandboxId);
+      if (!sandboxInfo) {
+        return {
+          pattern,
+          results: [],
+          message: 'Sandbox not currently active.',
+          success: false,
+        };
+      }
+
+      // Use grep to search for patterns
+      let grepCommand = `grep -r -n "${pattern.replace(/"/g, '\\"')}" /home/user/`;
+      if (filePattern) {
+        grepCommand = `grep -r -n --include="${filePattern}" "${pattern.replace(/"/g, '\\"')}" /home/user/`;
+      }
+
+      const result = await sandboxInfo.sandbox.commands.run(grepCommand);
+
+      // Parse grep output
+      const matches: Array<{ file: string; line: number; content: string }> = [];
+      const lines = (result.stdout || '').split('\n').filter((l: string) => l.trim());
+
+      for (const line of lines.slice(0, 50)) { // Limit to 50 matches
+        const match = line.match(/^(.+?):(\d+):(.+)$/);
+        if (match) {
+          matches.push({
+            file: match[1].replace('/home/user', ''),
+            line: parseInt(match[2]),
+            content: match[3].trim().substring(0, 200),
+          });
+        }
+      }
+
+      console.log(`🔍 Search for "${pattern}": ${matches.length} matches`);
+
+      return {
+        pattern,
+        filePattern,
+        results: matches,
+        count: matches.length,
+        truncated: lines.length > 50,
+        success: true,
+      };
+    } catch (error: any) {
+      // grep returns exit code 1 if no matches found
+      if (error.message?.includes('exit code 1')) {
+        return {
+          pattern,
+          results: [],
+          count: 0,
+          message: 'No matches found',
+          success: true,
+        };
+      }
+
+      console.error(`❌ Failed to search for "${pattern}":`, error.message);
+      return {
+        pattern,
+        results: [],
+        error: error.message,
+        success: false,
+      };
+    }
+  }
+
+  /**
    * Tool: Search Web (Perplexity)
    */
-  private async toolSearchWeb(query: string, focus?: string) {
+  private async toolSearchWeb(query: string) {
     if (!process.env.PERPLEXITY_API_KEY) {
       throw new Error('PERPLEXITY_API_KEY not configured');
     }
 
     try {
-      // Map focus to Perplexity model (2025 model names)
-      const modelMap: Record<string, string> = {
-        academic: 'sonar-pro',           // Enhanced for deep research
-        news: 'sonar',                   // Fast for current info
-        writing: 'sonar-reasoning',      // CoT for analysis
-        general: 'sonar-pro',            // Best balance
-      };
-
-      const model = modelMap[focus || 'general'];
-
       const response = await fetch('https://api.perplexity.ai/chat/completions', {
         method: 'POST',
         headers: {
@@ -557,19 +841,19 @@ You have access to the full internet via search_web. Use it extensively for any 
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          model,
+          model: 'sonar',  // Fast model for quick searches
           messages: [
             {
               role: 'system',
-              content: 'You are a helpful research assistant. Provide comprehensive, well-sourced answers with citations. Be thorough and accurate.',
+              content: 'Give a brief, factual answer. Be concise - max 2-3 paragraphs. Include key facts only.',
             },
             {
               role: 'user',
               content: query,
             },
           ],
-          temperature: 0.2,
-          max_tokens: 4000,
+          temperature: 0.1,
+          max_tokens: 800,  // Reduced from 4000 for faster, more focused responses
           return_citations: true,
           return_images: false,
         }),
@@ -581,16 +865,20 @@ You have access to the full internet via search_web. Use it extensively for any 
       }
 
       const data = await response.json() as any;
-      const answer = data.choices?.[0]?.message?.content || 'No results found';
+      let answer = data.choices?.[0]?.message?.content || 'No results found';
       const citations = data.citations || [];
 
-      console.log(`🔍 Web search completed: "${query.substring(0, 50)}..."`);
+      // Truncate long answers to keep context manageable
+      if (answer.length > 1500) {
+        answer = answer.substring(0, 1500) + '...';
+      }
+
+      console.log(`🔍 Web search completed: "${query.substring(0, 50)}..." (${answer.length} chars)`);
 
       return {
         query,
         answer,
-        citations,
-        model,
+        citations: citations.slice(0, 3),  // Limit citations
         success: true,
       };
     } catch (error: any) {
@@ -1056,6 +1344,306 @@ Format your response as JSON:
       where: { sessionId },
       orderBy: { createdAt: 'desc' },
     });
+  }
+
+  /**
+   * Synthesize conversation into a buildable prompt
+   */
+  async synthesizePrompt(sessionId: string): Promise<{
+    prompt: string;
+    title: string;
+    context: string[];
+    messageCount: number;
+  }> {
+    // Get session with messages
+    const session = await db.agentSession.findUnique({
+      where: { id: sessionId },
+      include: {
+        messages: {
+          orderBy: { createdAt: 'asc' },
+        },
+        project: true,
+      },
+    });
+
+    if (!session) {
+      throw new Error('Session not found');
+    }
+
+    if (session.messages.length < 2) {
+      throw new Error('Not enough conversation history to synthesize');
+    }
+
+    // Build conversation summary for Claude
+    const conversationText = session.messages
+      .map((m) => `${m.role.toUpperCase()}: ${m.content}`)
+      .join('\n\n');
+
+    // Extract tool results for context
+    const toolResults = session.messages
+      .filter((m) => m.toolCalls)
+      .flatMap((m) => {
+        const calls = m.toolCalls as any[];
+        return calls.map((tc) => ({
+          tool: tc.name,
+          output: tc.output,
+        }));
+      });
+
+    // Build context from search results and page creations
+    const context: string[] = [];
+    for (const tr of toolResults) {
+      if (tr.tool === 'search_web' && tr.output?.answer) {
+        context.push(`Research: ${tr.output.answer.substring(0, 200)}...`);
+      }
+      if (tr.tool === 'create_page' && tr.output?.title) {
+        context.push(`Created page: ${tr.output.title}`);
+      }
+    }
+
+    // Use Claude to synthesize the conversation into a buildable prompt
+    const synthesizePrompt = `You are synthesizing a research conversation into a clear, actionable code generation prompt.
+
+## Research Conversation:
+${conversationText}
+
+## Your Task:
+Based on this conversation, create:
+1. A clear, specific prompt that can be used to generate code
+2. A short title for this task (max 50 chars)
+
+The prompt should:
+- Be specific and actionable
+- Include all technical requirements discussed
+- Specify UI/UX preferences mentioned
+- Include any constraints or requirements
+
+Format your response as JSON:
+{
+  "title": "Short task title",
+  "prompt": "Detailed prompt for code generation..."
+}`;
+
+    try {
+      const response = await this.anthropic.messages.create({
+        model: 'claude-sonnet-4-5-20250929',
+        max_tokens: 2048,
+        messages: [
+          {
+            role: 'user',
+            content: synthesizePrompt,
+          },
+        ],
+      });
+
+      const textContent = response.content.find((block) => block.type === 'text');
+      if (textContent && textContent.type === 'text') {
+        const jsonMatch = textContent.text.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          const result = JSON.parse(jsonMatch[0]);
+          console.log(`✨ Synthesized prompt from session ${sessionId}: "${result.title}"`);
+          return {
+            prompt: result.prompt,
+            title: result.title,
+            context,
+            messageCount: session.messages.length,
+          };
+        }
+      }
+
+      throw new Error('Failed to parse synthesis result');
+    } catch (error: any) {
+      console.error('❌ Failed to synthesize prompt:', error.message);
+      // Fallback: use last user message as prompt
+      const lastUserMessage = session.messages
+        .filter((m) => m.role === 'user')
+        .pop();
+
+      return {
+        prompt: lastUserMessage?.content || 'Build based on research discussion',
+        title: 'Build from Research',
+        context,
+        messageCount: session.messages.length,
+      };
+    }
+  }
+
+  /**
+   * Create a task in Building column from synthesized prompt
+   */
+  async createBuildTask(
+    sessionId: string,
+    projectId: string,
+    input: { title: string; prompt: string }
+  ): Promise<{
+    taskId: string;
+    title: string;
+    prompt: string;
+    column: string;
+  }> {
+    // Get max order for tasks in building column
+    const maxOrderTask = await db.task.findFirst({
+      where: { projectId, column: 'building' },
+      orderBy: { order: 'desc' },
+      select: { order: true },
+    });
+
+    const order = (maxOrderTask?.order || 0) + 1;
+
+    // Create task in building column
+    const task = await db.task.create({
+      data: {
+        title: input.title,
+        description: input.prompt,
+        column: 'building',
+        status: 'in_progress',
+        priority: 'high',
+        order,
+        projectId,
+        agentSessionId: sessionId,
+        synthesizedPrompt: input.prompt,
+        buildStatus: 'pending',
+      },
+    });
+
+    // Log action
+    await db.agentAction.create({
+      data: {
+        sessionId,
+        actionType: 'create_build_task',
+        targetId: task.id,
+        targetType: 'task',
+        details: {
+          title: task.title,
+          column: 'building',
+          synthesizedPrompt: input.prompt.substring(0, 500),
+        },
+        status: 'executed',
+        executedAt: new Date(),
+      },
+    });
+
+    console.log(`🚀 Created build task from research: ${task.id} - "${task.title}"`);
+
+    return {
+      taskId: task.id,
+      title: task.title,
+      prompt: input.prompt,
+      column: 'building',
+    };
+  }
+
+  /**
+   * Synthesize content with a custom user prompt
+   * Used for creating tasks or notes from research conversations
+   */
+  async synthesizeWithCustomPrompt(
+    sessionId: string,
+    userPrompt: string,
+    mode: 'task' | 'note'
+  ): Promise<{
+    title: string;
+    content: string;
+    summary: string;
+  }> {
+    // Get session with messages
+    const session = await db.agentSession.findUnique({
+      where: { id: sessionId },
+      include: {
+        messages: {
+          orderBy: { createdAt: 'asc' },
+        },
+        project: true,
+      },
+    });
+
+    if (!session) {
+      throw new Error('Session not found');
+    }
+
+    if (session.messages.length < 1) {
+      throw new Error('No conversation history to synthesize');
+    }
+
+    // Build conversation summary for Claude
+    const conversationText = session.messages
+      .map((m) => `${m.role.toUpperCase()}: ${m.content}`)
+      .join('\n\n');
+
+    const modeInstructions = mode === 'task'
+      ? `Create a clear, actionable task based on the user's request.
+The task should:
+- Have a concise, action-oriented title (max 60 chars)
+- Include specific requirements and acceptance criteria
+- Be ready to hand off to a developer
+
+Format your response as JSON:
+{
+  "title": "Short action-oriented title",
+  "content": "Detailed task description with requirements, acceptance criteria, and any relevant technical details from the research",
+  "summary": "One-sentence summary of what this task accomplishes"
+}`
+      : `Create a well-organized note capturing insights from the conversation.
+The note should:
+- Have a descriptive title (max 60 chars)
+- Be formatted in Markdown with clear sections
+- Extract key insights, decisions, and findings
+- Include relevant quotes or data points
+
+Format your response as JSON:
+{
+  "title": "Descriptive note title",
+  "content": "Well-formatted Markdown note with sections, bullet points, and key takeaways",
+  "summary": "One-sentence summary of what this note captures"
+}`;
+
+    const synthesizePrompt = `You are synthesizing a research conversation into ${mode === 'task' ? 'an actionable task' : 'a comprehensive note'}.
+
+## Research Conversation:
+${conversationText}
+
+## User's Request:
+"${userPrompt}"
+
+## Your Task:
+${modeInstructions}`;
+
+    try {
+      const response = await this.anthropic.messages.create({
+        model: 'claude-sonnet-4-5-20250929',
+        max_tokens: 2048,
+        messages: [
+          {
+            role: 'user',
+            content: synthesizePrompt,
+          },
+        ],
+      });
+
+      const textContent = response.content.find((block) => block.type === 'text');
+      if (textContent && textContent.type === 'text') {
+        const jsonMatch = textContent.text.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          const result = JSON.parse(jsonMatch[0]);
+          console.log(`✨ Synthesized ${mode} from session ${sessionId}: "${result.title}"`);
+          return {
+            title: result.title,
+            content: result.content,
+            summary: result.summary,
+          };
+        }
+      }
+
+      throw new Error('Failed to parse synthesis result');
+    } catch (error: any) {
+      console.error(`❌ Failed to synthesize ${mode}:`, error.message);
+      // Fallback
+      return {
+        title: mode === 'task' ? 'Task from Research' : 'Note from Research',
+        content: userPrompt,
+        summary: 'Created from research conversation',
+      };
+    }
   }
 }
 

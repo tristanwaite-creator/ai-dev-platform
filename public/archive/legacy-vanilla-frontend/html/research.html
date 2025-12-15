@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Redirecting... | AI Dev Platform</title>
+    <script>
+        // Redirect to unified project view with research tab
+        const params = new URLSearchParams(window.location.search);
+        const projectId = params.get('id');
+        if (projectId) {
+            window.location.replace(`/project.html?id=${projectId}#research`);
+        } else {
+            window.location.replace('/projects.html');
+        }
+    </script>
+</head>
+<body>
+    <p>Redirecting to project view...</p>
+</body>
+</html>

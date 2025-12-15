@@ -51,6 +51,16 @@ npm run generate "Build an animated solar system with CSS animations"
 
 All generated files will be saved in the `output/` directory.
 
+## Project UI (Web)
+
+- Open `public/projects.html` to pick a project, then `public/project.html?id=...` to view it.
+- The project view now includes a fixed bottom navigation with:
+  - Notes: Notion-like pages (Documents) tab
+  - Preview: Opens/creates the live sandbox preview for the project
+  - Board: Trello-like Kanban board
+
+This bottom bar is available inside the project chat experience so you can jump between areas quickly.
+
 ## How It Works
 
 This tool uses the Claude Agent SDK to:

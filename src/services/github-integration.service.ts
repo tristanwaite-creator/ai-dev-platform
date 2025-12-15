@@ -167,7 +167,7 @@ export class GitHubIntegrationService {
       throw new Error('Generation has no sandbox');
     }
 
-    const files = await this.downloadFilesFromSandbox(generation.sandboxId);
+    const files = await this.downloadFilesFromSandbox(generation.sandboxId, project.id);
 
     if (files.length === 0) {
       throw new Error('No files to commit');
@@ -209,8 +209,19 @@ export class GitHubIntegrationService {
   /**
    * Download files from E2B sandbox (recursively)
    */
-  private async downloadFilesFromSandbox(sandboxId: string): Promise<FileChange[]> {
+  private async downloadFilesFromSandbox(sandboxId: string, projectId?: string): Promise<FileChange[]> {
     const files: FileChange[] = [];
+
+    // Try to reconnect to sandbox if it expired
+    try {
+      const sandboxInfo = e2bService.getSandbox(sandboxId);
+      if (!sandboxInfo) {
+        console.log(`⚠️  Sandbox ${sandboxId} not in memory, attempting reconnection...`);
+        await e2bService.reconnectSandbox(sandboxId, projectId);
+      }
+    } catch (error) {
+      throw new Error(`Failed to reconnect to sandbox ${sandboxId}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
 
     // Recursive function to list all files in directory tree
     const listFilesRecursively = async (directory: string): Promise<void> => {
@@ -371,6 +382,146 @@ export class GitHubIntegrationService {
         prNumber: prResult.prNumber,
       };
     }
+  }
+
+  /**
+   * Create a combined PR from multiple task branches
+   * Merges multiple task branches into a single feature branch, then creates PR
+   */
+  async createCombinedPullRequest(
+    projectId: string,
+    taskIds: string[]
+  ): Promise<{ prUrl: string; prNumber: number; branchName: string }> {
+    if (taskIds.length === 0) {
+      throw new Error('At least one task is required');
+    }
+
+    const project = await db.project.findUnique({
+      where: { id: projectId },
+      include: { user: true },
+    });
+
+    if (!project) {
+      throw new Error('Project not found');
+    }
+
+    if (!project.githubRepoOwner || !project.githubRepoName) {
+      throw new Error('Project not linked to GitHub repository');
+    }
+
+    // Get all tasks with their branches and generations
+    const tasks = await db.task.findMany({
+      where: {
+        id: { in: taskIds },
+        projectId,
+      },
+      include: {
+        generations: { orderBy: { createdAt: 'desc' } },
+      },
+    });
+
+    if (tasks.length !== taskIds.length) {
+      throw new Error('Some tasks were not found');
+    }
+
+    // Verify all tasks have branches
+    const tasksWithoutBranches = tasks.filter((t) => !t.branchName);
+    if (tasksWithoutBranches.length > 0) {
+      throw new Error(
+        `Tasks without branches: ${tasksWithoutBranches.map((t) => t.title).join(', ')}`
+      );
+    }
+
+    const github = await createGitHubService(project.userId);
+
+    // Create a combined branch name
+    const timestamp = Date.now();
+    const combinedBranchName = `combined/${timestamp}-${taskIds.length}-tasks`;
+
+    // Create the combined branch from the default branch
+    console.log(`🔀 Creating combined branch: ${combinedBranchName}`);
+    await github.createBranch(
+      project.githubRepoOwner,
+      project.githubRepoName,
+      combinedBranchName,
+      project.defaultBranch || 'main'
+    );
+
+    // Merge each task branch into the combined branch
+    for (const task of tasks) {
+      console.log(`🔀 Merging ${task.branchName} into ${combinedBranchName}...`);
+      try {
+        await github.mergeBranch(
+          project.githubRepoOwner,
+          project.githubRepoName,
+          task.branchName!,
+          combinedBranchName
+        );
+      } catch (error: any) {
+        // If merge fails (e.g., conflicts), log but continue with what we can
+        console.error(`⚠️ Failed to merge ${task.branchName}: ${error.message}`);
+        throw new Error(
+          `Merge conflict when combining ${task.title}. Please resolve conflicts manually.`
+        );
+      }
+    }
+
+    // Generate combined PR description
+    const prTitle = `Combined: ${tasks.map((t) => t.title).join(' + ')}`;
+    const prBody = this.generateCombinedPRDescription(tasks);
+
+    // Create the pull request
+    console.log(`📝 Creating combined PR: ${prTitle}`);
+    const pr = await github.createPullRequest(project.githubRepoOwner, project.githubRepoName, {
+      title: prTitle.substring(0, 256), // GitHub title limit
+      body: prBody,
+      head: combinedBranchName,
+      base: project.defaultBranch || 'main',
+      draft: false,
+    });
+
+    console.log(`✅ Combined PR created: ${pr.html_url}`);
+
+    return {
+      prUrl: pr.html_url,
+      prNumber: pr.number,
+      branchName: combinedBranchName,
+    };
+  }
+
+  /**
+   * Generate description for combined PR
+   */
+  private generateCombinedPRDescription(tasks: any[]): string {
+    const taskSummaries = tasks
+      .map(
+        (t) => `### ${t.title}\n${t.description || 'No description'}\n- Branch: \`${t.branchName}\``
+      )
+      .join('\n\n');
+
+    const allFiles = [
+      ...new Set(tasks.flatMap((t) => t.generations?.flatMap((g: any) => g.filesCreated) || [])),
+    ];
+
+    return `
+## Combined Pull Request
+
+This PR combines work from ${tasks.length} tasks:
+
+${taskSummaries}
+
+## All Files Changed
+
+${allFiles.map((f) => `- ${f}`).join('\n') || '- No files tracked'}
+
+## Task IDs
+
+${tasks.map((t) => `- \`${t.id}\``).join('\n')}
+
+---
+
+🤖 **Generated by AI Development Platform** - Combined PR
+`;
   }
 
   /**

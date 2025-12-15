@@ -4,6 +4,7 @@ import { authenticate } from '../middleware/auth.middleware.js';
 import { db } from '../lib/db.js';
 import { e2bService } from '../lib/e2b.js';
 import { githubIntegrationService } from '../services/github-integration.service.js';
+import { decrypt } from '../lib/encryption.js';
 
 const router = Router();
 
@@ -50,7 +51,13 @@ router.get(
       },
       include: {
         tasks: {
-          orderBy: { order: 'asc' },
+          orderBy: [{ column: 'asc' }, { order: 'asc' }],
+          include: {
+            generations: {
+              orderBy: { createdAt: 'desc' },
+              take: 1, // Latest generation only
+            },
+          },
         },
         generations: {
           orderBy: { createdAt: 'desc' },
@@ -381,7 +388,7 @@ router.patch(
   '/:projectId/tasks/:taskId',
   asyncHandler(async (req: Request, res: Response) => {
     const { projectId, taskId } = req.params;
-    const { title, description, status, priority, order } = req.body;
+    const { title, description, status, priority, order, synthesizedPrompt } = req.body;
 
     // Verify project ownership
     const project = await db.project.findFirst({
@@ -415,6 +422,7 @@ router.patch(
         ...(status !== undefined && { status }),
         ...(priority !== undefined && { priority }),
         ...(order !== undefined && { order }),
+        ...(synthesizedPrompt !== undefined && { synthesizedPrompt }),
         ...(status === 'done' && { completedAt: new Date() }),
       },
     });
@@ -701,6 +709,179 @@ router.delete(
 );
 
 /**
+ * POST /projects/:projectId/tasks/:taskId/preview
+ * Spin up a preview for a task - reconnects or creates sandbox and starts web server
+ * If sandbox expired, clones from GitHub to restore files
+ */
+router.post(
+  '/:projectId/tasks/:taskId/preview',
+  asyncHandler(async (req: Request, res: Response) => {
+    const { projectId, taskId } = req.params;
+
+    // Verify project ownership and get user's GitHub token
+    const project = await db.project.findFirst({
+      where: { id: projectId, userId: req.userId! },
+      include: { user: true },
+    });
+
+    if (!project) {
+      res.status(404).json({ error: 'Project not found' });
+      return;
+    }
+
+    // Decrypt the GitHub token (stored encrypted in database)
+    const githubToken = project.user.githubAccessToken
+      ? decrypt(project.user.githubAccessToken)
+      : null;
+
+    // Get task with latest generation
+    const task = await db.task.findFirst({
+      where: { id: taskId, projectId },
+      include: {
+        generations: {
+          where: { status: 'completed' },
+          orderBy: { createdAt: 'desc' },
+          take: 1,
+        },
+      },
+    });
+
+    if (!task) {
+      res.status(404).json({ error: 'Task not found' });
+      return;
+    }
+
+    const latestGeneration = task.generations[0];
+
+    if (!latestGeneration) {
+      res.status(400).json({ error: 'No completed generation found for this task. Generate code first.' });
+      return;
+    }
+
+    try {
+      const originalSandboxId = latestGeneration.sandboxId;
+      let sandboxId = originalSandboxId;
+      let sandboxUrl: string;
+      let needsClone = false;
+
+      if (sandboxId) {
+        // Try to reconnect to existing sandbox
+        console.log(`🔌 Spinning up preview for task ${taskId}, sandbox: ${sandboxId}`);
+        const sandboxInfo = await e2bService.reconnectSandbox(sandboxId, projectId);
+
+        // Check if we got a different (new) sandbox - means original expired
+        if (sandboxInfo.sandboxId !== originalSandboxId) {
+          console.log(`🔄 Sandbox was recreated (${originalSandboxId} → ${sandboxInfo.sandboxId}), need to restore files`);
+          needsClone = true;
+        }
+
+        sandboxId = sandboxInfo.sandboxId;
+      } else {
+        // No sandbox exists - create new one
+        console.log(`📦 Creating new sandbox for task ${taskId} preview`);
+        const sandboxInfo = await e2bService.createSandbox({ projectId });
+        sandboxId = sandboxInfo.sandboxId;
+        needsClone = true;
+      }
+
+      // If sandbox was recreated, download files from GitHub
+      if (needsClone && task.branchName && project.githubRepoOwner && project.githubRepoName && githubToken) {
+        console.log(`📥 Restoring files from GitHub branch: ${task.branchName}`);
+        try {
+          await e2bService.downloadFromGitHub(
+            sandboxId,
+            project.githubRepoOwner,
+            project.githubRepoName,
+            task.branchName,
+            '/home/user',
+            githubToken
+          );
+        } catch (downloadError) {
+          console.error(`⚠️ Failed to download from GitHub:`, downloadError);
+          // Continue anyway - might have files from generation or user can re-generate
+        }
+      }
+
+      // Start web server
+      const result = await e2bService.startWebServer(sandboxId, '/home/user', 8000, projectId);
+      sandboxUrl = result.url;
+      sandboxId = result.sandboxId;
+
+      // Update generation with new sandbox ID if it changed
+      if (sandboxId !== latestGeneration.sandboxId) {
+        await db.generation.update({
+          where: { id: latestGeneration.id },
+          data: { sandboxId },
+        });
+      }
+
+      console.log(`✅ Preview ready for task ${taskId}: ${sandboxUrl}`);
+
+      res.json({
+        message: 'Preview started successfully',
+        sandboxId,
+        sandboxUrl,
+      });
+    } catch (error) {
+      console.error(`❌ Failed to spin up preview for task ${taskId}:`, error);
+      res.status(500).json({
+        error: 'Failed to start preview',
+        details: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
+  })
+);
+
+/**
+ * POST /projects/:projectId/combined-pr
+ * Create a combined PR from multiple task branches
+ */
+router.post(
+  '/:projectId/combined-pr',
+  asyncHandler(async (req: Request, res: Response) => {
+    const { projectId } = req.params;
+    const { taskIds } = req.body;
+
+    if (!taskIds || !Array.isArray(taskIds) || taskIds.length === 0) {
+      res.status(400).json({ error: 'taskIds array is required' });
+      return;
+    }
+
+    // Verify project ownership
+    const project = await db.project.findFirst({
+      where: { id: projectId, userId: req.userId! },
+    });
+
+    if (!project) {
+      res.status(404).json({ error: 'Project not found' });
+      return;
+    }
+
+    if (!project.githubRepoOwner || !project.githubRepoName) {
+      res.status(400).json({ error: 'Project not linked to GitHub repository' });
+      return;
+    }
+
+    try {
+      const result = await githubIntegrationService.createCombinedPullRequest(
+        projectId,
+        taskIds
+      );
+
+      res.json({
+        message: 'Combined PR created successfully',
+        ...result,
+      });
+    } catch (error: any) {
+      console.error('❌ Failed to create combined PR:', error);
+      res.status(500).json({
+        error: error.message || 'Failed to create combined PR',
+      });
+    }
+  })
+);
+
+/**
  * POST /projects/:id/sandbox
  * Create/activate E2B sandbox for a project
  */
@@ -867,6 +1048,53 @@ router.get(
     } catch (error) {
       res.status(500).json({
         error: error instanceof Error ? error.message : 'Failed to list files',
+      });
+    }
+  })
+);
+
+/**
+ * GET /projects/:id/sandbox/file
+ * Read a single file from the project's sandbox
+ */
+router.get(
+  '/:id/sandbox/file',
+  asyncHandler(async (req: Request, res: Response) => {
+    const { id } = req.params;
+    const { path } = req.query;
+
+    if (!path || typeof path !== 'string') {
+      res.status(400).json({ error: 'File path is required' });
+      return;
+    }
+
+    // Verify project ownership
+    const project = await db.project.findFirst({
+      where: { id, userId: req.userId! },
+    });
+
+    if (!project) {
+      res.status(404).json({ error: 'Project not found' });
+      return;
+    }
+
+    if (!project.sandboxId) {
+      res.status(404).json({ error: 'No sandbox found for this project' });
+      return;
+    }
+
+    const sandboxInfo = e2bService.getSandbox(project.sandboxId);
+    if (!sandboxInfo) {
+      res.status(404).json({ error: 'Sandbox not active or expired' });
+      return;
+    }
+
+    try {
+      const content = await e2bService.readFile(project.sandboxId, path);
+      res.json({ content, path });
+    } catch (error) {
+      res.status(500).json({
+        error: error instanceof Error ? error.message : 'Failed to read file',
       });
     }
   })

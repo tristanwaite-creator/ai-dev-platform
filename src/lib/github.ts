@@ -8,6 +8,46 @@ type Commit = RestEndpointMethodTypes['repos']['getCommit']['response']['data'];
 type PullRequest = RestEndpointMethodTypes['pulls']['create']['response']['data'];
 type GitHubUser = RestEndpointMethodTypes['users']['getAuthenticated']['response']['data'];
 
+// Retry configuration
+const RETRY_DELAYS = [1000, 2000, 4000]; // Exponential backoff: 1s, 2s, 4s
+const RETRYABLE_STATUS_CODES = [408, 429, 500, 502, 503, 504];
+
+/**
+ * Retry helper with exponential backoff
+ * Retries on network errors and specific HTTP status codes
+ */
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  operationName: string,
+  attempt: number = 0
+): Promise<T> {
+  try {
+    return await fn();
+  } catch (error: any) {
+    const isLastAttempt = attempt >= RETRY_DELAYS.length;
+    const shouldRetry =
+      !isLastAttempt &&
+      (error.status && RETRYABLE_STATUS_CODES.includes(error.status)) ||
+      error.code === 'ECONNRESET' ||
+      error.code === 'ETIMEDOUT';
+
+    if (shouldRetry) {
+      const delay = RETRY_DELAYS[attempt];
+      console.warn(
+        `⚠️  GitHub API ${operationName} failed (attempt ${attempt + 1}/${RETRY_DELAYS.length + 1}): ${error.message}`
+      );
+      console.log(`⏳ Retrying in ${delay}ms...`);
+
+      await new Promise(resolve => setTimeout(resolve, delay));
+      return withRetry(fn, operationName, attempt + 1);
+    }
+
+    // Not retryable or last attempt failed
+    console.error(`❌ GitHub API ${operationName} failed after ${attempt + 1} attempts:`, error.message);
+    throw error;
+  }
+}
+
 export interface FileChange {
   path: string;
   content: string;
@@ -58,18 +98,22 @@ export class GitHubService {
   // ============================================
 
   async createRepository(name: string, options: CreateRepoOptions = {}): Promise<Repository> {
-    const { data } = await this.octokit.repos.createForAuthenticatedUser({
-      name,
-      description: options.description,
-      private: options.private ?? true,
-      auto_init: options.autoInit ?? true,
-    });
-    return data;
+    return withRetry(async () => {
+      const { data } = await this.octokit.repos.createForAuthenticatedUser({
+        name,
+        description: options.description,
+        private: options.private ?? true,
+        auto_init: options.autoInit ?? true,
+      });
+      return data;
+    }, 'createRepository');
   }
 
   async getRepository(owner: string, repo: string): Promise<Repository> {
-    const { data } = await this.octokit.repos.get({ owner, repo });
-    return data;
+    return withRetry(async () => {
+      const { data } = await this.octokit.repos.get({ owner, repo });
+      return data;
+    }, 'getRepository');
   }
 
   async listUserRepositories(page = 1, perPage = 30): Promise<Repository[]> {
@@ -95,24 +139,26 @@ export class GitHubService {
     branchName: string,
     fromBranch: string = 'main'
   ): Promise<Branch> {
-    // Get the SHA of the base branch
-    const { data: baseBranch } = await this.octokit.repos.getBranch({
-      owner,
-      repo,
-      branch: fromBranch,
-    });
+    return withRetry(async () => {
+      // Get the SHA of the base branch
+      const { data: baseBranch } = await this.octokit.repos.getBranch({
+        owner,
+        repo,
+        branch: fromBranch,
+      });
 
-    // Create new branch from base SHA
-    await this.octokit.git.createRef({
-      owner,
-      repo,
-      ref: `refs/heads/${branchName}`,
-      sha: baseBranch.commit.sha,
-    });
+      // Create new branch from base SHA
+      await this.octokit.git.createRef({
+        owner,
+        repo,
+        ref: `refs/heads/${branchName}`,
+        sha: baseBranch.commit.sha,
+      });
 
-    // Return the newly created branch
-    const { data } = await this.octokit.repos.getBranch({ owner, repo, branch: branchName });
-    return data as any;
+      // Return the newly created branch
+      const { data } = await this.octokit.repos.getBranch({ owner, repo, branch: branchName });
+      return data as any;
+    }, 'createBranch');
   }
 
   async getBranch(owner: string, repo: string, branchName: string): Promise<Branch> {
@@ -133,6 +179,29 @@ export class GitHubService {
     });
   }
 
+  /**
+   * Merge one branch into another (without PR)
+   * Used for combining multiple task branches
+   */
+  async mergeBranch(
+    owner: string,
+    repo: string,
+    headBranch: string,
+    baseBranch: string,
+    commitMessage?: string
+  ): Promise<{ sha: string }> {
+    return withRetry(async () => {
+      const { data } = await this.octokit.repos.merge({
+        owner,
+        repo,
+        base: baseBranch,
+        head: headBranch,
+        commit_message: commitMessage || `Merge ${headBranch} into ${baseBranch}`,
+      });
+      return { sha: data.sha };
+    }, 'mergeBranch');
+  }
+
   // ============================================
   // Commit Operations
   // ============================================
@@ -144,68 +213,70 @@ export class GitHubService {
     files: FileChange[],
     message: string
   ): Promise<Commit> {
-    // Get current branch reference
-    const { data: ref } = await this.octokit.git.getRef({
-      owner,
-      repo,
-      ref: `heads/${branch}`,
-    });
+    return withRetry(async () => {
+      // Get current branch reference
+      const { data: ref } = await this.octokit.git.getRef({
+        owner,
+        repo,
+        ref: `heads/${branch}`,
+      });
 
-    const currentCommitSha = ref.object.sha;
+      const currentCommitSha = ref.object.sha;
 
-    // Get current commit to access tree
-    const { data: currentCommit } = await this.octokit.git.getCommit({
-      owner,
-      repo,
-      commit_sha: currentCommitSha,
-    });
+      // Get current commit to access tree
+      const { data: currentCommit } = await this.octokit.git.getCommit({
+        owner,
+        repo,
+        commit_sha: currentCommitSha,
+      });
 
-    // Create blobs for each file
-    const blobs = await Promise.all(
-      files.map(async (file) => {
-        const { data: blob } = await this.octokit.git.createBlob({
-          owner,
-          repo,
-          content: file.content,
-          encoding: file.encoding || 'utf-8',
-        });
-        return { path: file.path, sha: blob.sha, mode: '100644' as const, type: 'blob' as const };
-      })
-    );
+      // Create blobs for each file
+      const blobs = await Promise.all(
+        files.map(async (file) => {
+          const { data: blob } = await this.octokit.git.createBlob({
+            owner,
+            repo,
+            content: file.content,
+            encoding: file.encoding || 'utf-8',
+          });
+          return { path: file.path, sha: blob.sha, mode: '100644' as const, type: 'blob' as const };
+        })
+      );
 
-    // Create new tree
-    const { data: tree } = await this.octokit.git.createTree({
-      owner,
-      repo,
-      base_tree: currentCommit.tree.sha,
-      tree: blobs,
-    });
+      // Create new tree
+      const { data: tree } = await this.octokit.git.createTree({
+        owner,
+        repo,
+        base_tree: currentCommit.tree.sha,
+        tree: blobs,
+      });
 
-    // Create new commit
-    const { data: newCommit } = await this.octokit.git.createCommit({
-      owner,
-      repo,
-      message,
-      tree: tree.sha,
-      parents: [currentCommitSha],
-    });
+      // Create new commit
+      const { data: newCommit } = await this.octokit.git.createCommit({
+        owner,
+        repo,
+        message,
+        tree: tree.sha,
+        parents: [currentCommitSha],
+      });
 
-    // Update branch reference
-    await this.octokit.git.updateRef({
-      owner,
-      repo,
-      ref: `heads/${branch}`,
-      sha: newCommit.sha,
-    });
+      // Update branch reference
+      await this.octokit.git.updateRef({
+        owner,
+        repo,
+        ref: `heads/${branch}`,
+        sha: newCommit.sha,
+      });
 
-    // Return full commit object
-    const { data: fullCommit } = await this.octokit.repos.getCommit({
-      owner,
-      repo,
-      ref: newCommit.sha,
-    });
+      // Return full commit object
+      const { data: fullCommit } = await this.octokit.repos.getCommit({
+        owner,
+        repo,
+        ref: newCommit.sha,
+      });
 
-    return fullCommit;
+      return fullCommit;
+    }, 'createCommit');
   }
 
   async getCommit(owner: string, repo: string, sha: string): Promise<Commit> {
@@ -232,16 +303,18 @@ export class GitHubService {
     repo: string,
     options: CreatePROptions
   ): Promise<PullRequest> {
-    const { data } = await this.octokit.pulls.create({
-      owner,
-      repo,
-      title: options.title,
-      body: options.body,
-      head: options.head,
-      base: options.base,
-      draft: options.draft,
-    });
-    return data;
+    return withRetry(async () => {
+      const { data } = await this.octokit.pulls.create({
+        owner,
+        repo,
+        title: options.title,
+        body: options.body,
+        head: options.head,
+        base: options.base,
+        draft: options.draft,
+      });
+      return data;
+    }, 'createPullRequest');
   }
 
   async getPullRequest(owner: string, repo: string, prNumber: number): Promise<PullRequest> {
@@ -255,12 +328,14 @@ export class GitHubService {
   }
 
   async mergePullRequest(owner: string, repo: string, prNumber: number, mergeMethod: 'merge' | 'squash' | 'rebase' = 'merge'): Promise<void> {
-    await this.octokit.pulls.merge({
-      owner,
-      repo,
-      pull_number: prNumber,
-      merge_method: mergeMethod,
-    });
+    return withRetry(async () => {
+      await this.octokit.pulls.merge({
+        owner,
+        repo,
+        pull_number: prNumber,
+        merge_method: mergeMethod,
+      });
+    }, 'mergePullRequest');
   }
 
   async closePullRequest(owner: string, repo: string, prNumber: number): Promise<void> {

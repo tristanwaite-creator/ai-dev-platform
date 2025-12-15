@@ -126,7 +126,7 @@ Start by creating the files now.`;
         prompt,
         options: {
           cwd: tempDir,
-          permissionMode: 'acceptEdits',
+          permissionMode: 'bypassPermissions',
           model: 'claude-sonnet-4-5-20250929',
         }
       });
@@ -248,7 +248,13 @@ Start by creating the files now.`;
 
       // Start web server in the sandbox
       console.log('🌐 Starting web server in sandbox...');
-      const sandboxUrl = await e2bService.startWebServer(sandboxId, '/home/user', 8000);
+      const webServerResult = await e2bService.startWebServer(sandboxId, '/home/user', 8000, projectId);
+      const sandboxUrl = webServerResult.url;
+      // Update sandboxId in case a new sandbox was created
+      if (webServerResult.sandboxId !== sandboxId) {
+        sandboxId = webServerResult.sandboxId;
+        console.log(`📦 New sandbox created: ${sandboxId}`);
+      }
 
       // GitHub Integration: Auto-commit if enabled and task is linked
       let commitSha: string | undefined;

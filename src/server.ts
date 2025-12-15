@@ -17,6 +17,7 @@ import githubRoutes from './routes/github.routes.js';
 import researchRoutes from './routes/research.routes.js';
 import pagesRoutes from './routes/pages.routes.js';
 import pagesAgentRoutes from './routes/pages-agent.routes.js';
+import webhookRoutes from './routes/webhook.routes.js';
 
 // Import middleware
 import { errorHandler, notFoundHandler } from './middleware/error.middleware.js';
@@ -48,16 +49,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// API Routes
-app.use('/api/auth', authRoutes);
-app.use('/api/auth', githubAuthRoutes);
-app.use('/api', githubRoutes);
-app.use('/api/projects', projectRoutes);
-app.use('/api', researchRoutes);
-app.use('/api', pagesRoutes);
-app.use('/api', pagesAgentRoutes);
-
-// Health check
+// Health check (must be before protected routers)
 app.get('/api/health', async (req, res) => {
   // Check database connection
   let dbStatus = 'unknown';
@@ -90,7 +82,13 @@ app.get('/api/health', async (req, res) => {
   });
 });
 
-// Generate HTML project endpoint with Server-Sent Events
+// API Routes - unprotected routes first
+app.use('/api/auth', authRoutes);
+app.use('/api/auth', githubAuthRoutes);
+app.use('/api', githubRoutes);
+app.use('/api/webhooks', webhookRoutes);
+
+// Generate HTML project endpoint with Server-Sent Events (no auth required for onboarding)
 app.post('/api/generate', async (req, res) => {
   console.log('📥 Received generate request');
   const {
@@ -227,7 +225,7 @@ Start by creating the files now.`;
       prompt,
       options: {
         cwd: tempDir,
-        permissionMode: 'acceptEdits',
+        permissionMode: 'bypassPermissions',
         model: 'claude-sonnet-4-5-20250929',
       }
     });
@@ -367,7 +365,13 @@ Start by creating the files now.`;
 
     // Start web server in the sandbox
     sendEvent('status', { message: 'Starting web server in sandbox...', type: 'info' });
-    const sandboxUrl = await e2bService.startWebServer(sandboxId, '/home/user', 8000);
+    const webServerResult = await e2bService.startWebServer(sandboxId, '/home/user', 8000, projectId);
+    const sandboxUrl = webServerResult.url;
+    // Update sandboxId if a new sandbox was created
+    if (webServerResult.sandboxId !== sandboxId) {
+      sandboxId = webServerResult.sandboxId;
+      console.log(`📦 New sandbox created: ${sandboxId}`);
+    }
 
     // GitHub Integration: Auto-commit if enabled and task is linked
     let commitSha: string | undefined;
@@ -454,6 +458,12 @@ Start by creating the files now.`;
     res.end();
   }
 });
+
+// Protected API routes (these have router.use(authenticate) so must come after unprotected routes)
+app.use('/api/projects', projectRoutes);
+app.use('/api', researchRoutes);
+app.use('/api', pagesRoutes);
+app.use('/api', pagesAgentRoutes);
 
 // Serve generated files
 app.use('/output', express.static(join(process.cwd(), 'output')));
