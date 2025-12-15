@@ -25,3 +25,11 @@ Thumbs.db
 *.swo
 
 /src/generated/prisma
+
+# Temporary/debug files
+logs/
+test-screenshots/
+demo-*.png
+demo-*.js
+scripts/create-repo.ts
+scripts/check-token.ts
