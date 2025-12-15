@@ -500,7 +500,15 @@ export const api = {
       method: 'PUT',
       body: { blocks },
     });
-    if (!res.ok) throw new Error('Failed to update blocks');
+    if (!res.ok) {
+      const error = await res.json().catch(() => ({ error: 'Failed to update blocks' }));
+      // Don't throw for 404 (page deleted) or 403 (access changed) - just silently fail
+      if (res.status === 404 || res.status === 403) {
+        console.warn('Page no longer accessible:', error.error);
+        return { blocks: [], blockCount: 0, skipped: true };
+      }
+      throw new Error(error.error || 'Failed to update blocks');
+    }
     return res.json();
   },
 

@@ -1,12 +1,11 @@
 'use client';
 
-import { useEffect, useMemo, useState, useCallback } from 'react';
+import { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import { usePages } from '@/providers/pages-provider';
 import { BlockNoteEditor, PartialBlock } from '@blocknote/core';
 import { BlockNoteView } from '@blocknote/mantine';
 import { useCreateBlockNote } from '@blocknote/react';
 import '@blocknote/mantine/style.css';
-import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Loader2, FileText } from 'lucide-react';
 import { api } from '@/lib/api';
@@ -88,6 +87,13 @@ export function PageEditor({ className }: PageEditorProps) {
   const [title, setTitle] = useState('');
   const [isSavingBlocks, setIsSavingBlocks] = useState(false);
 
+  // Track if we're in the middle of replacing blocks (to prevent save during load)
+  const isReplacingBlocksRef = useRef(false);
+  // Track which page the editor was last initialized for
+  const lastPageIdRef = useRef<string | null>(null);
+  // Track if we've made actual user changes
+  const hasUserChangesRef = useRef(false);
+
   // Initialize title when page changes
   useEffect(() => {
     if (currentPage) {
@@ -106,16 +112,22 @@ export function PageEditor({ className }: PageEditorProps) {
   const saveBlocks = useMemo(
     () =>
       debounce(async (blocks: PartialBlock[], pageId: string) => {
+        // Don't save if we're replacing blocks or no user changes
+        if (isReplacingBlocksRef.current || !hasUserChangesRef.current) {
+          return;
+        }
+
         setIsSavingBlocks(true);
         try {
           const transformedBlocks = blockNoteToBlocks(blocks);
           await api.updateBlocks(pageId, transformedBlocks);
         } catch (error) {
           console.error('Failed to save blocks:', error);
+          toast.error('Failed to save changes');
         } finally {
           setIsSavingBlocks(false);
         }
-      }, 1000),
+      }, 1500), // Increased debounce to reduce save frequency
     []
   );
 
@@ -123,16 +135,40 @@ export function PageEditor({ className }: PageEditorProps) {
   useEffect(() => {
     if (!currentPage || !editor) return;
 
+    // Skip if this is the same page we already loaded
+    if (lastPageIdRef.current === currentPage.id) {
+      return;
+    }
+
+    // Mark that we're replacing blocks (not user edits)
+    isReplacingBlocksRef.current = true;
+    hasUserChangesRef.current = false;
+    lastPageIdRef.current = currentPage.id;
+
     const blocks = currentPage.blocks
       ? blocksToBlockNote(currentPage.blocks)
-      : ([{ type: 'paragraph', content: '' }] as PartialBlock[]);
+      : ([{ type: 'paragraph', content: [] }] as PartialBlock[]);
 
     editor.replaceBlocks(editor.document, blocks as any);
-  }, [currentPage?.id]);
+
+    // Allow saves again after a short delay
+    setTimeout(() => {
+      isReplacingBlocksRef.current = false;
+    }, 500);
+  }, [currentPage?.id, currentPage?.blocks, editor]);
 
   // Handle editor changes
   const handleEditorChange = useCallback(() => {
     if (!currentPage?.id) return;
+
+    // Don't save during block replacement
+    if (isReplacingBlocksRef.current) {
+      return;
+    }
+
+    // Mark that user has made changes
+    hasUserChangesRef.current = true;
+
     const blocks = editor.document;
     saveBlocks(blocks, currentPage.id);
   }, [currentPage?.id, editor, saveBlocks]);
