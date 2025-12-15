@@ -657,6 +657,87 @@ router.patch(
 );
 
 /**
+ * PUT /pages/:pageId/blocks/batch
+ * Batch update all blocks for a page (replace all blocks)
+ * Used by BlockNote editor for saving entire document
+ */
+router.put(
+  '/pages/:pageId/blocks/batch',
+  asyncHandler(async (req: Request, res: Response) => {
+    const { pageId } = req.params;
+    const { blocks } = req.body; // Array of { id?, type, content, order, parentBlockId? }
+
+    if (!Array.isArray(blocks)) {
+      res.status(400).json({ error: 'Blocks array is required' });
+      return;
+    }
+
+    // Verify page exists and user has access
+    const page = await db.page.findUnique({
+      where: { id: pageId },
+      include: { project: true },
+    });
+
+    if (!page) {
+      res.status(404).json({ error: 'Page not found' });
+      return;
+    }
+
+    const project = await db.project.findFirst({
+      where: { id: page.projectId, userId: req.userId! },
+    });
+
+    if (!project) {
+      res.status(403).json({ error: 'Access denied' });
+      return;
+    }
+
+    // Perform batch update in a transaction
+    const result = await db.$transaction(async (tx) => {
+      // Delete all existing blocks for this page
+      await tx.block.deleteMany({
+        where: { pageId },
+      });
+
+      // Create new blocks if any
+      if (blocks.length > 0) {
+        const createdBlocks = await Promise.all(
+          blocks.map((block: any, index: number) =>
+            tx.block.create({
+              data: {
+                type: block.type || 'text',
+                content: block.content || {},
+                pageId,
+                order: block.order ?? index,
+                parentBlockId: block.parentBlockId || null,
+              },
+            })
+          )
+        );
+
+        return createdBlocks;
+      }
+
+      return [];
+    });
+
+    // Update page's lastEditedBy
+    await db.page.update({
+      where: { id: pageId },
+      data: { lastEditedById: req.userId! },
+    });
+
+    console.log(`📝 Batch updated ${result.length} blocks for page ${pageId}`);
+
+    res.json({
+      message: 'Blocks updated successfully',
+      blockCount: result.length,
+      blocks: result,
+    });
+  })
+);
+
+/**
  * POST /pages/:pageId/generate-title
  * Auto-generate a title from page content
  */

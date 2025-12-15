@@ -34,28 +34,50 @@ function blocksToBlockNote(blocks: Block[]): PartialBlock[] {
     return [
       {
         type: 'paragraph',
-        content: '',
+        content: [],
       } as PartialBlock,
     ];
   }
 
-  return blocks.map((block) => ({
-    id: block.id,
-    type: block.type as any,
-    props: block.content.props || {},
-    content: block.content.content || '',
-    children: (block.content.children || []) as any,
-  } as PartialBlock));
+  return blocks.map((block) => {
+    // If we stored the full BlockNote structure in content, restore it
+    const content = block.content as any;
+
+    // Handle legacy format or new format
+    if (content && content.blockNoteBlock) {
+      // New format: full BlockNote block stored
+      return content.blockNoteBlock as PartialBlock;
+    }
+
+    // Legacy format: try to reconstruct
+    return {
+      id: block.id,
+      type: (block.type as any) || 'paragraph',
+      props: content?.props || {},
+      content: Array.isArray(content?.content) ? content.content : [],
+      children: Array.isArray(content?.children) ? content.children : [],
+    } as PartialBlock;
+  });
 }
 
 // Transform BlockNote format to database blocks
+// We store the full BlockNote block structure to preserve all data
 function blockNoteToBlocks(blocks: PartialBlock[]): Array<{ type: string; content: Record<string, unknown> }> {
-  return blocks.map((block) => ({
-    type: (block as any).type || 'paragraph',
+  return blocks.map((block: any) => ({
+    type: block.type || 'paragraph',
     content: {
-      props: (block as any).props || {},
-      content: (block as any).content || '',
-      children: (block as any).children || [],
+      // Store the entire BlockNote block for lossless round-trip
+      blockNoteBlock: {
+        id: block.id,
+        type: block.type,
+        props: block.props || {},
+        content: block.content || [],
+        children: block.children || [],
+      },
+      // Also store flattened version for search/display
+      props: block.props || {},
+      content: block.content || [],
+      children: block.children || [],
     },
   }));
 }
