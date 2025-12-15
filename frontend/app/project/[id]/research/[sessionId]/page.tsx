@@ -296,12 +296,27 @@ export default function ResearchChatPage() {
         type: 'document',
       });
 
-      // Add the content as a block
+      // Add the content as paragraphs in BlockNote format
       if (page.page?.id) {
-        await api.createBlock(page.page.id, {
-          type: 'text',
-          content: { text: content },
-        });
+        const paragraphs = content.split('\n\n').filter((p: string) => p.trim());
+        for (let i = 0; i < paragraphs.length; i++) {
+          const paragraph = paragraphs[i].trim();
+          await api.createBlock(page.page.id, {
+            type: 'paragraph',
+            content: {
+              blockNoteBlock: {
+                type: 'paragraph',
+                props: {},
+                content: [{ type: 'text', text: paragraph }],
+                children: [],
+              },
+              props: {},
+              content: [{ type: 'text', text: paragraph }],
+              children: [],
+            },
+            order: i,
+          });
+        }
       }
 
       toast.success('Saved to Notes!', {
@@ -369,10 +384,25 @@ export default function ResearchChatPage() {
           type: 'document',
         });
         if (page.page?.id) {
-          await api.createBlock(page.page.id, {
-            type: 'text',
-            content: { text: synthesizedContent },
-          });
+          const paragraphs = synthesizedContent.split('\n\n').filter((p: string) => p.trim());
+          for (let i = 0; i < paragraphs.length; i++) {
+            const paragraph = paragraphs[i].trim();
+            await api.createBlock(page.page.id, {
+              type: 'paragraph',
+              content: {
+                blockNoteBlock: {
+                  type: 'paragraph',
+                  props: {},
+                  content: [{ type: 'text', text: paragraph }],
+                  children: [],
+                },
+                props: {},
+                content: [{ type: 'text', text: paragraph }],
+                children: [],
+              },
+              order: i,
+            });
+          }
         }
         toast.success(`Note "${synthesizedTitle}" saved!`);
       }

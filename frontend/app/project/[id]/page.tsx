@@ -302,13 +302,30 @@ function ProjectWorkspaceContent() {
           icon: '📝',
         });
 
-        // Add the content as a text block
+        // Add the content as a paragraph block in BlockNote format
         if (pageData.page?.id) {
-          await api.createBlock(pageData.page.id, {
-            type: 'text',
-            content: { text: result.content },
-            order: 0,
-          });
+          // Split content into paragraphs for better formatting
+          const paragraphs = result.content.split('\n\n').filter((p: string) => p.trim());
+
+          for (let i = 0; i < paragraphs.length; i++) {
+            const paragraph = paragraphs[i].trim();
+            // Create block in BlockNote-compatible format
+            await api.createBlock(pageData.page.id, {
+              type: 'paragraph',
+              content: {
+                blockNoteBlock: {
+                  type: 'paragraph',
+                  props: {},
+                  content: [{ type: 'text', text: paragraph }],
+                  children: [],
+                },
+                props: {},
+                content: [{ type: 'text', text: paragraph }],
+                children: [],
+              },
+              order: i,
+            });
+          }
         }
 
         fetchPages(projectId);
